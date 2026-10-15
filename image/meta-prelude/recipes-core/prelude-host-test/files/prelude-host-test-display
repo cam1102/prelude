@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+
+status=/run/prelude/host-test-status
+
+while :; do
+    printf '\033[2J\033[H'
+    printf 'CAR THING USB HOST TEST\n'
+    printf '=======================\n\n'
+    if [ -r "$status" ]; then
+        cat "$status"
+    else
+        printf 'Waiting for the test service...\n'
+    fi
+    printf '\n\nDo not run host-confirm during this test.\n'
+    sleep 1
+done

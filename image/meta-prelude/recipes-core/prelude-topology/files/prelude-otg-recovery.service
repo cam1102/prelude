@@ -1,0 +1,14 @@
+[Unit]
+Description=Recover a failed direct-OTG phone-projection session
+After=prelude-usb-host.service
+ConditionPathExists=/usr/libexec/prelude-topology-otg
+ConditionPathExists=/var/lib/prelude/diagnostics/last-wired-failure
+
+[Service]
+Type=oneshot
+Environment=PRELUDE_SESSION_TOPOLOGY_MARKER=/usr/libexec/prelude-topology-otg
+ExecStart=/usr/libexec/prelude-session-recover
+TimeoutStartSec=90s
+
+[Install]
+WantedBy=multi-user.target

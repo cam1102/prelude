@@ -1,0 +1,41 @@
+[package]
+name = "prelude-media"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+default = []
+linux-backend = [
+    "dep:gstreamer",
+    "dep:gstreamer-app",
+    "dep:gstreamer-video",
+    "dep:smithay-client-toolkit",
+    "dep:wayland-client",
+]
+
+[dependencies]
+chacha20poly1305 = "0.10.1"
+prelude-control = { path = "../carplay-control" }
+serde.workspace = true
+thiserror.workspace = true
+zeroize = "1.8.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gstreamer = { version = "0.23.6", optional = true }
+gstreamer-app = { version = "0.23.5", optional = true }
+gstreamer-video = { version = "0.23.6", optional = true }
+smithay-client-toolkit = { workspace = true, optional = true }
+wayland-client = { workspace = true, optional = true }
+
+[dev-dependencies]
+prelude-net = { path = "../carplay-net" }
+hex.workspace = true
+proptest.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

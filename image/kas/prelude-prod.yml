@@ -1,0 +1,14 @@
+header:
+  version: 18
+  includes:
+    - repo: meta-prelude
+      file: kas/prelude.yml
+
+target:
+  - prelude-prod-image
+
+repos:
+  meta-prelude:
+    path: .
+    layers:
+      meta-prelude:

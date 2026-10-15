@@ -1,0 +1,11 @@
+[Unit]
+Description=Check the wired phone-projection USB host path
+After=prelude-usb-host.service
+Requires=prelude-usb-host.service
+ConditionPathExists=/var/lib/prelude/persistent-host-enabled
+OnFailure=prelude-host-health-failure.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/preludectl host-health
+TimeoutStartSec=15s

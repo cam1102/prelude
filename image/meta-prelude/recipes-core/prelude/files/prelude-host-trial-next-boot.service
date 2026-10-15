@@ -1,0 +1,16 @@
+[Unit]
+Description=Consume one scheduled USB host trial at boot
+After=local-fs.target systemd-modules-load.service systemd-udev-trigger.service
+After=superbird-usb-gadget.service android-tools-adbd.service prelude-usb-host.service
+Before=preluded.service
+ConditionPathExists=/dev/i2c-2
+ConditionPathExists=/var/lib/prelude/host-trial-next-boot
+OnFailure=prelude-device-recovery.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/preludectl consume-host-trial-next-boot
+TimeoutStartSec=90s
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,34 @@
+[package]
+name = "prelude-usb-carkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+der = { version = "0.7.10", features = ["pem"] }
+plist = "=1.7.0"
+openssl = "0.10.75"
+rand = "0.8.5"
+rsa = { version = "0.9.10", features = ["sha2"] }
+rusb.workspace = true
+serde.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+time = "=0.3.36"
+tracing.workspace = true
+uuid.workspace = true
+x509-cert = { workspace = true, features = ["builder", "hazmat", "pem"] }
+zeroize = "1.8.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tun = "0.8.4"
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

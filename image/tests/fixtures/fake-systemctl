@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+
+case "${1:-}" in
+    is-active)
+        [ -f "$CT_TEST_TIMER_STATE" ]
+        ;;
+    stop)
+        rm -f "$CT_TEST_TIMER_STATE"
+        ;;
+    show)
+        echo "test-deadline"
+        ;;
+    start)
+        ;;
+    *)
+        echo "unexpected fake systemctl command: ${1:-}" >&2
+        exit 2
+        ;;
+esac

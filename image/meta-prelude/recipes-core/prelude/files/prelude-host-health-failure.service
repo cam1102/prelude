@@ -1,0 +1,10 @@
+[Unit]
+Description=Count wired projection host-health failures and restore USB recovery
+After=prelude-host-health.service
+ConditionPathExists=/var/lib/prelude/persistent-host-enabled
+OnFailure=prelude-device-recovery.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/preludectl host-health-failure
+TimeoutStartSec=15s

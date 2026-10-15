@@ -1,0 +1,23 @@
+[package]
+name = "prelude-wireless"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+nix.workspace = true
+prost = "0.14.1"
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch for an interrupted USB host/device transition
+
+[Path]
+PathExists=/var/lib/prelude/device-recovery-required
+Unit=prelude-device-recovery.service
+
+[Install]
+WantedBy=multi-user.target

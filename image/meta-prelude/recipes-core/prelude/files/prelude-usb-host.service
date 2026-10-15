@@ -1,0 +1,16 @@
+[Unit]
+Description=Prepare the Car Thing USB port for wired phone-projection host mode
+After=systemd-modules-load.service systemd-udev-trigger.service
+Before=preluded.service
+ConditionPathExists=/dev/i2c-2
+ConditionPathExists=/var/lib/prelude/persistent-host-enabled
+OnFailure=prelude-device-recovery.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/preludectl host-boot
+RemainAfterExit=yes
+TimeoutStartSec=30s
+
+[Install]
+WantedBy=multi-user.target

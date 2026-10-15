@@ -1,0 +1,41 @@
+header:
+  version: 18
+  includes:
+    - repo: yocto-superbird
+      file: kas/superbird.yml
+
+distro: prelude
+
+local_conf_header:
+  cache: |
+    SSTATE_MIRRORS = "file://.* https://sstate.bridgething.com/sstate/PATH;downloadfilename=PATH \n file://.* http://sstate.yoctoproject.org/all/PATH;downloadfilename=PATH"
+    PREMIRRORS ?= "https?$://.*/.* http://sources.openembedded.org/ \n git://.*/.* http://sources.openembedded.org/ \n"
+    BB_GENERATE_MIRROR_TARBALLS = "1"
+  hashequiv: |
+    BB_SIGNATURE_HANDLER = "OEEquivHash"
+    BB_HASHSERVE = "auto"
+    BB_HASHSERVE_UPSTREAM = "wss://hashserv.bridgething.com/ws"
+
+target:
+  - prelude-dev-image
+  - prelude-prod-image
+
+env:
+  PRELUDE_MONOREPO_SRC_URI: null
+  PRELUDE_MONOREPO_SRCREV: null
+  PRELUDE_WIRELESS_COUNTRY: null
+  PRELUDE_WIRELESS_PASSPHRASE: null
+
+repos:
+  yocto-superbird:
+    url: https://github.com/JoeyEamigh/yocto-superbird.git
+    commit: bcba74441aa9e35b3a07cc8f087277e8281a5a46
+    path: sources/yocto-superbird
+    layers:
+      meta-superbird:
+
+  meta-prelude:
+    path: .
+    layers:
+      meta-prelude:
+

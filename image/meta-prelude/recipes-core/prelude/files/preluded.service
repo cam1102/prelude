@@ -1,0 +1,26 @@
+[Unit]
+Description=CT automatic phone-projection daemon
+After=dbus.service prelude-usb-host.service prelude-host-trial-next-boot.service superbird-weston.service
+Conflicts=superbird-als.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/preluded
+ExecStart=/usr/bin/preluded --config /etc/prelude/config.toml
+Restart=on-failure
+RestartSec=2s
+# The live OTG profile permits two 15s configuration reconnects during
+# activation and another 15s restore. Its computed worker-stop bound is 48s.
+TimeoutStopSec=60s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/run/prelude /var/lib/prelude
+# The daemon owns the calibrated ALS controls and the panel PWM backlight.
+ReadWritePaths=-/sys/bus/iio/devices -/sys/class/backlight
+LimitRTPRIO=20
+
+[Install]
+WantedBy=multi-user.target

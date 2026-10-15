@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodically verify the wired CarPlay USB host path
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Unit=prelude-host-health.service
+
+[Install]
+WantedBy=timers.target
+

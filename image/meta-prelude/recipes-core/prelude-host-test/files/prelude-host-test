@@ -1,0 +1,175 @@
+#!/bin/sh
+set -eu
+
+status=/run/prelude/host-test-status
+diagnostics_root=/var/lib/prelude/diagnostics/usb-host-test
+run_id=$(tr -d '\r\n' < /proc/sys/kernel/random/boot_id)
+diagnostics="$diagnostics_root/runs/$run_id"
+trial_seconds=150
+observation_seconds=60
+result_hold_seconds=20
+host_active=0
+
+mkdir -p /run/prelude "$diagnostics"
+latest_run_temporary="$diagnostics_root/latest-run.tmp.$$"
+printf '%s\n' "$run_id" > "$latest_run_temporary"
+mv -f "$latest_run_temporary" "$diagnostics_root/latest-run"
+
+write_status() {
+    temporary="${status}.tmp.$$"
+    printf '%s\n' "$@" > "$temporary"
+    mv -f "$temporary" "$status"
+}
+
+usb_counts() {
+    root_hubs=0
+    external_devices=0
+    external_hubs=0
+    for device in /sys/bus/usb/devices/*; do
+        [ -f "$device/idVendor" ] || continue
+        [ -r "$device/devpath" ] || continue
+        devpath=$(cat "$device/devpath")
+        if [ "$devpath" = 0 ]; then
+            root_hubs=$((root_hubs + 1))
+            continue
+        fi
+        external_devices=$((external_devices + 1))
+        if [ -r "$device/bDeviceClass" ] && [ "$(cat "$device/bDeviceClass")" = 09 ]; then
+            external_hubs=$((external_hubs + 1))
+        fi
+    done
+}
+
+capture() {
+    preludectl doctor --json > "$diagnostics/doctor.json.tmp" \
+        2> "$diagnostics/doctor.stderr.tmp" || true
+    mv -f "$diagnostics/doctor.json.tmp" "$diagnostics/doctor.json"
+    mv -f "$diagnostics/doctor.stderr.tmp" "$diagnostics/doctor.stderr"
+    lsusb > "$diagnostics/lsusb.txt.tmp" 2>&1 || true
+    mv -f "$diagnostics/lsusb.txt.tmp" "$diagnostics/lsusb.txt"
+    lsusb -t > "$diagnostics/lsusb-tree.txt.tmp" 2>&1 || true
+    mv -f "$diagnostics/lsusb-tree.txt.tmp" "$diagnostics/lsusb-tree.txt"
+    : > "$diagnostics/devices.tsv.tmp"
+    for device in /sys/bus/usb/devices/*; do
+        [ -r "$device/idVendor" ] || continue
+        [ -r "$device/idProduct" ] || continue
+        devpath=$(cat "$device/devpath" 2>/dev/null || printf '?')
+        class=$(cat "$device/bDeviceClass" 2>/dev/null || printf '?')
+        driver=none
+        if [ -L "$device/driver" ]; then
+            driver=$(basename "$(readlink "$device/driver")")
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$(basename "$device")" "$(cat "$device/idVendor")" \
+            "$(cat "$device/idProduct")" "$class" "$devpath" "$driver" \
+            >> "$diagnostics/devices.tsv.tmp"
+    done
+    mv -f "$diagnostics/devices.tsv.tmp" "$diagnostics/devices.tsv"
+    dmesg | tail -n 300 > "$diagnostics/dmesg-tail.txt.tmp" 2>&1 || true
+    mv -f "$diagnostics/dmesg-tail.txt.tmp" "$diagnostics/dmesg-tail.txt"
+}
+
+restore_device() {
+    write_status \
+        "RESTORING USB DEVICE MODE" \
+        "The test result has been saved." \
+        "Please wait..."
+    if preludectl device-mode >> "$diagnostics/runner.log" 2>&1; then
+        host_active=0
+        return 0
+    fi
+    return 1
+}
+
+emergency_restore() {
+    result=$?
+    trap - EXIT INT TERM
+    if [ "$host_active" -eq 1 ]; then
+        preludectl device-mode >> "$diagnostics/runner.log" 2>&1 || \
+            systemctl start --no-block prelude-device-recovery.service 2>/dev/null || true
+    fi
+    exit "$result"
+}
+trap emergency_restore EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+: > "$diagnostics/runner.log"
+write_status \
+    "STARTING SAFE HOST TRIAL" \
+    "Power and data will switch to host mode." \
+    "Automatic fallback is armed first."
+
+if ! preludectl host-trial --timeout "$trial_seconds" \
+    >> "$diagnostics/runner.log" 2>&1; then
+    write_status \
+        "ERROR: HOST MODE DID NOT START" \
+        "Device recovery has been requested." \
+        "Reconnect the Mac after recovery."
+    exit 1
+fi
+host_active=1
+
+elapsed=0
+outcome=fail
+while [ "$elapsed" -lt "$observation_seconds" ]; do
+    usb_counts
+    write_status \
+        "HOST MODE ACTIVE" \
+        "Root hubs:       $root_hubs" \
+        "External USB:    $external_devices" \
+        "External hubs:   $external_hubs" \
+        "" \
+        "Waiting for the dock and flash drive..." \
+        "Time remaining:  $((observation_seconds - elapsed)) seconds"
+    if [ "$external_devices" -gt 0 ]; then
+        outcome=pass
+        break
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+done
+
+usb_counts
+capture
+printf '%s\n' "$outcome" > "$diagnostics/outcome.tmp"
+mv -f "$diagnostics/outcome.tmp" "$diagnostics/outcome"
+
+if [ "$outcome" = pass ]; then
+    write_status \
+        "PASS: EXTERNAL USB DETECTED" \
+        "Root hubs:       $root_hubs" \
+        "External USB:    $external_devices" \
+        "External hubs:   $external_hubs" \
+        "" \
+        "The dock data path enumerated." \
+        "Restoring device mode in $result_hold_seconds seconds."
+else
+    write_status \
+        "FAIL: ROOT HUB ONLY" \
+        "Root hubs:       $root_hubs" \
+        "External USB:    $external_devices" \
+        "External hubs:   $external_hubs" \
+        "" \
+        "The dock never appeared on USB." \
+        "Restoring device mode in $result_hold_seconds seconds."
+fi
+sleep "$result_hold_seconds"
+
+restore_device
+capture
+
+if [ "$outcome" = pass ]; then
+    write_status \
+        "PASS: DOCK DATA PATH WORKS" \
+        "USB device mode has been restored." \
+        "Reconnect the Mac to collect diagnostics."
+else
+    write_status \
+        "FAIL: DOCK DID NOT ENUMERATE" \
+        "USB device mode has been restored." \
+        "Reconnect the Mac to collect diagnostics."
+fi
+
+trap - EXIT INT TERM
+exit 0

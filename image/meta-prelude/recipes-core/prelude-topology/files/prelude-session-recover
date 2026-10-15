@@ -1,0 +1,48 @@
+#!/bin/sh
+set -eu
+
+failure=${PRELUDE_SESSION_FAILURE_FILE:-/var/lib/prelude/diagnostics/last-wired-failure}
+blocked_failure=$failure.ambiguous-topology
+usb_devices=${PRELUDE_SESSION_USB_DEVICES:-/sys/bus/usb/devices}
+systemctl_bin=${PRELUDE_SESSION_SYSTEMCTL:-systemctl}
+topology_marker=${PRELUDE_SESSION_TOPOLOGY_MARKER:-}
+
+[ -n "$topology_marker" ] || exit 1
+[ -f "$topology_marker" ] || exit 0
+[ -f "$failure" ] || exit 0
+
+# Count projection phones before disturbing the active service. Apple's USB
+# audio adapter shares the vendor ID but is not an iPhone; an Android phone is
+# unambiguous here after it has re-enumerated with an AOA accessory product ID.
+found=0
+for vendor in "$usb_devices"/*/idVendor; do
+    [ -f "$vendor" ] || continue
+    vendor_id=$(cat "$vendor")
+    product=${vendor%/idVendor}/idProduct
+    if [ "$vendor_id" = 05ac ]; then
+        [ -f "$product" ] || continue
+        product_name=${vendor%/idVendor}/product
+        if [ -f "$product_name" ] && [ "$(cat "$product_name")" != iPhone ]; then
+            continue
+        fi
+        case "$(cat "$product")" in
+            129?|12a?) found=$((found + 1)) ;;
+        esac
+        continue
+    fi
+    if [ "$vendor_id" = 18d1 ] && [ -f "$product" ]; then
+        case "$(cat "$product")" in
+            2d00|2d01|2d02|2d03|2d04|2d05) found=$((found + 1)) ;;
+        esac
+    fi
+done
+if [ "$found" -gt 1 ]; then
+    mv -f "$failure" "$blocked_failure"
+    exit 0
+fi
+
+# Restart only the protocol owner. Direct OTG lets the daemon restore and
+# reselect the physical phone without changing the USB role.
+"$systemctl_bin" stop preluded.service
+"$systemctl_bin" start preluded.service
+rm -f "$failure" "$blocked_failure"

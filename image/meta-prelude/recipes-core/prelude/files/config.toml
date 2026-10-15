@@ -1,0 +1,44 @@
+state_dir = "/var/lib/prelude"
+
+[usb]
+polling_interval_ms = 1000
+configuration_is_private = false
+allow_configuration_changes = false
+allow_private_apple_configuration = false
+allow_private_lockdown_service = false
+allow_first_time_pairing = false
+pairing_records_directory = "/var/lib/prelude/pairing-records"
+
+[projection]
+mode = "disabled"
+allow_experimental_private_protocol = false
+require_complete_capabilities = true
+
+[android_auto]
+enable_live_session = false
+ui_density_dpi = 170
+
+[iap2]
+enable_live_session = false
+
+[airplay]
+enable_live_receiver = false
+enable_live_input = false
+
+[media]
+video = "none"
+audio = "none"
+microphone = "none"
+
+[platform]
+ui_rotation_degrees = 270
+diagnostic_level = "info"
+
+[platform.ambient_light]
+enabled = true
+automatic_brightness = true
+automatic_night_mode = true
+night_mode_on_darkness_percent = 70
+night_mode_off_darkness_percent = 50
+night_mode_on_delay_ms = 8000
+night_mode_off_delay_ms = 3000

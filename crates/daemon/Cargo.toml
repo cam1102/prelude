@@ -1,0 +1,43 @@
+[package]
+name = "preluded"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+default = ["linux-media"]
+linux-media = ["prelude-media/linux-backend"]
+
+[dependencies]
+clap.workspace = true
+prelude-android-auto-protocol = { path = "../android-auto-protocol" }
+prelude-android-auto = { path = "../android-auto" }
+prelude-control = { path = "../carplay-control" }
+prelude-iap2 = { path = "../iap2" }
+prelude-media = { path = "../carplay-media", default-features = false }
+prelude-mfi = { path = "../mfi" }
+prelude-net = { path = "../carplay-net" }
+prelude-usb-carkit = { path = "../usb-carkit" }
+prelude-wireless = { path = "../wireless" }
+fontdue.workspace = true
+hex.workspace = true
+nix.workspace = true
+platform-superbird = { path = "../platform-superbird" }
+plist = "=1.7.0"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+zeroize = "1.8.1"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

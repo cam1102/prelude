@@ -1,0 +1,17 @@
+[Unit]
+Description=Run one bounded Car Thing USB-host enumeration test
+After=local-fs.target systemd-modules-load.service systemd-udev-trigger.service
+After=superbird-usb-gadget.service android-tools-adbd.service prelude-host-test-display.service
+Wants=prelude-host-test-display.service
+Before=preluded.service
+ConditionPathExists=/dev/i2c-2
+OnFailure=prelude-device-recovery.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/prelude-host-test
+TimeoutStartSec=180s
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

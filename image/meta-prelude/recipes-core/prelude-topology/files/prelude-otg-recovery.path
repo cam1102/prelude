@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch for failed direct-OTG CarPlay sessions
+ConditionPathExists=/usr/libexec/prelude-topology-otg
+
+[Path]
+PathExists=/var/lib/prelude/diagnostics/last-wired-failure
+Unit=prelude-otg-recovery.service
+
+[Install]
+WantedBy=multi-user.target

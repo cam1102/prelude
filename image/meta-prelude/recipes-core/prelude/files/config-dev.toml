@@ -1,0 +1,55 @@
+state_dir = "/var/lib/prelude"
+
+[usb]
+polling_interval_ms = 1000
+configuration = 6
+configuration_is_private = true
+allow_configuration_changes = true
+allow_private_apple_configuration = true
+allow_private_lockdown_service = true
+allow_first_time_pairing = true
+pairing_records_directory = "/var/lib/prelude/pairing-records"
+configuration_reconnect_timeout_ms = 15000
+mux_io_timeout_ms = 5000
+
+[projection]
+mode = "automatic"
+allow_experimental_private_protocol = true
+require_complete_capabilities = true
+
+[android_auto]
+enable_live_session = true
+head_unit_name = "Prelude"
+ui_density_dpi = 170
+
+[iap2]
+enable_live_session = true
+
+[airplay]
+enable_live_receiver = true
+enable_live_input = true
+disable_audio_output = false
+display_width_physical_mm = 86
+display_height_physical_mm = 52
+display_max_fps = 30
+setup_code_file = "/var/lib/prelude/airplay/setup-code"
+
+[media]
+video = "amlogic_v4l2"
+audio = "alsa_usb"
+microphone = "built_in_superbird"
+
+[media.usb_dac]
+
+[platform]
+ui_rotation_degrees = 270
+diagnostic_level = "debug"
+
+[platform.ambient_light]
+enabled = true
+automatic_brightness = true
+automatic_night_mode = true
+night_mode_on_darkness_percent = 70
+night_mode_off_darkness_percent = 50
+night_mode_on_delay_ms = 8000
+night_mode_off_delay_ms = 3000

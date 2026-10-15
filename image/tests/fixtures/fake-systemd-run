@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+
+if [ "${CT_TEST_SYSTEMD_RUN_FAIL:-0}" = 1 ]; then
+    exit 1
+fi
+touch "$CT_TEST_TIMER_STATE"

@@ -1,0 +1,17 @@
+/target/
+/target-linux/
+/tmp/
+/image/build/
+/image/downloads/
+/image/sstate-cache/
+/image/sources/
+__pycache__/
+*.pyc
+/.cache/
+/.idea/
+/.vscode/
+.DS_Store
+*.log
+/.ruff_cache/
+/device-diagnostics/
+/logs/

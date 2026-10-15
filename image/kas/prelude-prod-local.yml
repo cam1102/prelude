@@ -1,0 +1,28 @@
+header:
+  version: 18
+  includes:
+    - repo: meta-prelude
+      file: kas/prelude-prod.yml
+
+target:
+  - prelude-prod-image
+
+local_conf_header:
+  prelude-externalsrc: |
+    PRELUDE_LOCAL_MONOREPO = "/monorepo"
+
+    INHERIT += "externalsrc"
+    EXTERNALSRC:pn-prelude-runtime = "${PRELUDE_LOCAL_MONOREPO}"
+    EXTERNALSRC_BUILD:pn-prelude-runtime = "${WORKDIR}/build"
+    EXTERNALSRC_SYMLINKS = ""
+
+    SRC_URI:remove:pn-prelude-runtime = "${PRELUDE_MONOREPO_SRC_URI}"
+    SRCREV:pn-prelude-runtime = "INVALID"
+
+    CARGO_BUILD_FLAGS:append:pn-prelude-runtime = " --config profile.release.lto=false --config profile.release.codegen-units=32"
+
+repos:
+  meta-prelude:
+    path: .
+    layers:
+      meta-prelude:

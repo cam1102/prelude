@@ -1,0 +1,14 @@
+[Unit]
+Description=Superbird first-boot init
+DefaultDependencies=no
+After=local-fs.target
+Before=sysinit.target
+RequiresMountsFor=/var/lib
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/superbird-init
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target

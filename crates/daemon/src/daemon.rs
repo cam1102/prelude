@@ -1,0 +1,740 @@
+use crate::{
+    AudioBackend, AudioRuntimeSnapshot, AudioStatusWriter, DaemonConfig, DiagnosticEvent,
+    DiagnosticSnapshot, Diagnostics, Error, HealthRegistry, HealthState, HeartbeatWriter,
+    ProjectionDevice, ProjectionDeviceDiscovery, ProjectionMode, Result, VideoBackend,
+};
+use prelude_control::{ImplementationStatus, ProjectionCapabilities};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeProbe {
+    pub state: HealthState,
+    pub detail: String,
+    pub transport_state: HealthState,
+    pub transport_detail: String,
+    pub link_state: HealthState,
+    pub link_detail: String,
+    pub control_state: HealthState,
+    pub control_detail: String,
+    pub authentication_state: HealthState,
+    pub authentication_detail: String,
+    pub session_state: HealthState,
+    pub session_detail: String,
+    pub implementation: ImplementationStatus,
+    pub capabilities: ProjectionCapabilities,
+}
+
+pub trait ProjectionRuntime: std::fmt::Debug + Send {
+    fn probe(&mut self) -> RuntimeProbe;
+    fn set_phone_presence(&mut self, _present: bool) {}
+    fn audio_status(&mut self) -> AudioRuntimeSnapshot {
+        AudioRuntimeSnapshot::disabled()
+    }
+    fn play_audio_test_tone(&mut self) -> Result<()> {
+        Err(Error::NotReady {
+            component: "audio mixer",
+            state: "not running",
+        })
+    }
+    fn start(&mut self, device: &ProjectionDevice) -> Result<()>;
+    fn stop(&mut self) -> Result<()>;
+}
+
+#[derive(Debug, Default)]
+pub struct UnsupportedProjectionRuntime;
+
+impl ProjectionRuntime for UnsupportedProjectionRuntime {
+    fn probe(&mut self) -> RuntimeProbe {
+        RuntimeProbe {
+            state: HealthState::Unsupported,
+            detail: "no projection protocol runtime is linked".to_owned(),
+            transport_state: HealthState::Unsupported,
+            transport_detail: "no wired projection transport is linked".to_owned(),
+            link_state: HealthState::Unsupported,
+            link_detail: "no projection link runtime is linked".to_owned(),
+            control_state: HealthState::Unsupported,
+            control_detail: "no projection control runtime is linked".to_owned(),
+            authentication_state: HealthState::Unsupported,
+            authentication_detail: "no projection authentication runtime is linked".to_owned(),
+            session_state: HealthState::Unsupported,
+            session_detail: "no projection session runtime is linked".to_owned(),
+            implementation: ImplementationStatus::Unsupported,
+            capabilities: ProjectionCapabilities::default(),
+        }
+    }
+
+    fn start(&mut self, _device: &ProjectionDevice) -> Result<()> {
+        Err(Error::Unsupported(
+            "no projection protocol runtime is linked",
+        ))
+    }
+
+    fn stop(&mut self) -> Result<()> {
+        Err(Error::Unsupported(
+            "no projection protocol runtime is linked",
+        ))
+    }
+}
+
+#[derive(Debug)]
+pub struct Daemon<D, P> {
+    config: DaemonConfig,
+    discovery: D,
+    projection: P,
+    devices: Vec<ProjectionDevice>,
+    health: HealthRegistry,
+    diagnostics: Diagnostics,
+    heartbeat: HeartbeatWriter,
+    audio_status: AudioStatusWriter,
+}
+
+impl<D: ProjectionDeviceDiscovery, P: ProjectionRuntime> Daemon<D, P> {
+    pub fn new(config: DaemonConfig, discovery: D, projection: P) -> Result<Self> {
+        config.validate()?;
+        let heartbeat = HeartbeatWriter::new(config.state_dir.clone());
+        #[cfg(not(test))]
+        let audio_status = AudioStatusWriter::new(crate::AUDIO_RUNTIME_STATUS_PATH);
+        #[cfg(test)]
+        let audio_status = AudioStatusWriter::new(config.state_dir.join("audio-runtime.json"));
+        Ok(Self {
+            config,
+            discovery,
+            projection,
+            devices: Vec::new(),
+            health: HealthRegistry::default(),
+            diagnostics: Diagnostics::new(256),
+            heartbeat,
+            audio_status,
+        })
+    }
+
+    pub fn poll(&mut self) -> Result<DiagnosticSnapshot> {
+        let projection_required = self.config.projection.mode != ProjectionMode::Disabled;
+        match self.discovery.scan() {
+            Ok(devices) => {
+                self.devices = devices;
+                self.projection.set_phone_presence(!self.devices.is_empty());
+                self.health.set(
+                    "usb_discovery",
+                    projection_required,
+                    HealthState::Ready,
+                    format!(
+                        "{} supported projection phone(s) observed",
+                        self.devices.len()
+                    ),
+                );
+            }
+            Err(error) => {
+                self.devices.clear();
+                self.health.set(
+                    "usb_discovery",
+                    projection_required,
+                    HealthState::Failed,
+                    error.to_string(),
+                );
+                self.diagnostics
+                    .record(DiagnosticEvent::now("usb_discovery", "libusb scan failed"));
+            }
+        }
+
+        let (phone_state, phone_detail) = match self.devices.as_slice() {
+            _ if !projection_required => {
+                (HealthState::Disabled, "projection is disabled".to_owned())
+            }
+            [] => (
+                HealthState::NotReady,
+                "no supported iPhone or Android phone is connected".to_owned(),
+            ),
+            [device] => (
+                HealthState::Ready,
+                format!("{} USB candidate available", device.protocol_name()),
+            ),
+            devices => (
+                HealthState::Failed,
+                format!(
+                    "{} supported phones are connected; disconnect all but one",
+                    devices.len()
+                ),
+            ),
+        };
+        self.health.set(
+            "projection_phone",
+            projection_required,
+            phone_state,
+            phone_detail,
+        );
+
+        let probe = self.projection.probe();
+        self.health.set(
+            "projection_runtime",
+            projection_required,
+            if projection_required {
+                probe.state
+            } else {
+                HealthState::Disabled
+            },
+            if projection_required {
+                probe.detail
+            } else {
+                "projection is disabled".to_owned()
+            },
+        );
+        self.health.set(
+            "projection_transport",
+            projection_required,
+            if projection_required {
+                probe.transport_state
+            } else {
+                HealthState::Disabled
+            },
+            if projection_required {
+                probe.transport_detail
+            } else {
+                "projection is disabled".to_owned()
+            },
+        );
+        self.health.set(
+            "projection_authentication",
+            projection_required,
+            if projection_required {
+                probe.authentication_state
+            } else {
+                HealthState::Disabled
+            },
+            if projection_required {
+                probe.authentication_detail
+            } else {
+                "projection is disabled".to_owned()
+            },
+        );
+        self.health.set(
+            "projection_link",
+            projection_required,
+            if projection_required {
+                probe.link_state
+            } else {
+                HealthState::Disabled
+            },
+            if projection_required {
+                probe.link_detail
+            } else {
+                "projection is disabled".to_owned()
+            },
+        );
+        self.health.set(
+            "projection_control",
+            projection_required,
+            if projection_required {
+                probe.control_state
+            } else {
+                HealthState::Disabled
+            },
+            if projection_required {
+                probe.control_detail
+            } else {
+                "projection is disabled".to_owned()
+            },
+        );
+        self.health.set(
+            "projection_session",
+            projection_required,
+            if projection_required {
+                probe.session_state
+            } else {
+                HealthState::Disabled
+            },
+            if projection_required {
+                probe.session_detail
+            } else {
+                "projection is disabled".to_owned()
+            },
+        );
+        self.update_media_health(projection_required, probe.capabilities);
+        let audio_status = self.projection.audio_status();
+        self.audio_status
+            .write(&audio_status)
+            .map_err(|error| Error::AudioStatus {
+                path: self.audio_status.path().to_path_buf(),
+                detail: error.to_string(),
+            })?;
+        if let Err(error) = self.heartbeat.write() {
+            self.health.set(
+                "daemon_heartbeat",
+                projection_required,
+                HealthState::Failed,
+                error.to_string(),
+            );
+            return Err(error);
+        }
+        self.health.set(
+            "daemon_heartbeat",
+            projection_required,
+            HealthState::Ready,
+            format!("updated {}", self.heartbeat.path().display()),
+        );
+        Ok(self.diagnostics.snapshot(&self.health))
+    }
+
+    pub fn start(&mut self) -> Result<()> {
+        if self.config.projection.mode == ProjectionMode::Disabled {
+            return Err(Error::Unsupported(
+                "projection is disabled by configuration",
+            ));
+        }
+        let device = match self.devices.as_slice() {
+            [device] => device,
+            [] => {
+                return Err(Error::NotReady {
+                    component: "projection phone discovery",
+                    state: "no_device",
+                });
+            }
+            _ => {
+                return Err(Error::NotReady {
+                    component: "projection phone discovery",
+                    state: "ambiguous_devices",
+                });
+            }
+        };
+        self.projection.start(device)
+    }
+
+    pub fn stop(&mut self) -> Result<()> {
+        if self.config.projection.mode == ProjectionMode::Disabled {
+            return Ok(());
+        }
+        self.projection.stop()?;
+        self.audio_status
+            .write(&self.projection.audio_status())
+            .map_err(|error| Error::AudioStatus {
+                path: self.audio_status.path().to_path_buf(),
+                detail: error.to_string(),
+            })
+    }
+
+    pub fn maintain_projection(&mut self) -> Result<bool> {
+        if !matches!(
+            self.config.projection.mode,
+            ProjectionMode::Automatic | ProjectionMode::ExperimentalPrivateProtocol
+        ) {
+            return Ok(false);
+        }
+        if matches!(
+            self.projection.probe().transport_state,
+            HealthState::Starting | HealthState::Ready
+        ) {
+            return Ok(false);
+        }
+        self.start()?;
+        Ok(true)
+    }
+
+    pub fn diagnostics_json(&self) -> Result<String> {
+        self.diagnostics.snapshot_json(&self.health)
+    }
+
+    pub fn polling_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.config.usb.polling_interval_ms)
+    }
+
+    pub fn replace_projection_runtime(
+        &mut self,
+        config: DaemonConfig,
+        projection: P,
+    ) -> Result<()> {
+        config.validate()?;
+        if self.config.projection.mode != ProjectionMode::Disabled {
+            self.projection.stop()?;
+        }
+        self.config = config;
+        self.projection = projection;
+        Ok(())
+    }
+
+    pub const fn config(&self) -> &DaemonConfig {
+        &self.config
+    }
+
+    pub fn audio_status_snapshot(&mut self) -> AudioRuntimeSnapshot {
+        self.projection.audio_status()
+    }
+
+    pub fn play_audio_test_tone(&mut self) -> Result<()> {
+        self.projection.play_audio_test_tone()
+    }
+
+    pub fn has_discovered_phone(&self) -> bool {
+        !self.devices.is_empty()
+    }
+
+    fn update_media_health(
+        &mut self,
+        projection_required: bool,
+        capabilities: ProjectionCapabilities,
+    ) {
+        let video_configured = self.config.media.video != VideoBackend::None;
+        self.health.set(
+            "video",
+            projection_required,
+            media_state(projection_required, video_configured, capabilities.video),
+            media_detail(
+                projection_required,
+                video_configured,
+                capabilities.video,
+                "video",
+            ),
+        );
+        let audio_configured = self.config.media.audio != AudioBackend::None;
+        self.health.set(
+            "audio",
+            projection_required,
+            media_state(projection_required, audio_configured, capabilities.audio),
+            media_detail(
+                projection_required,
+                audio_configured,
+                capabilities.audio,
+                "audio",
+            ),
+        );
+        let microphone_configured = self.config.media.microphone != AudioBackend::None;
+        self.health.set(
+            "microphone",
+            projection_required && self.config.projection.require_complete_capabilities,
+            media_state(
+                projection_required,
+                microphone_configured,
+                capabilities.microphone,
+            ),
+            media_detail(
+                projection_required,
+                microphone_configured,
+                capabilities.microphone,
+                "microphone",
+            ),
+        );
+    }
+}
+
+fn media_state(required: bool, configured: bool, negotiated: bool) -> HealthState {
+    if !required {
+        HealthState::Disabled
+    } else if !configured {
+        HealthState::Unsupported
+    } else if !negotiated {
+        HealthState::NotReady
+    } else {
+        HealthState::Ready
+    }
+}
+
+fn media_detail(
+    required: bool,
+    configured: bool,
+    negotiated: bool,
+    component: &'static str,
+) -> String {
+    if !required {
+        "projection is disabled".to_owned()
+    } else if !configured {
+        format!("no {component} backend is configured")
+    } else if !negotiated {
+        format!("projection runtime did not negotiate {component}")
+    } else {
+        format!("{component} backend and capability are available")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+
+    use prelude_usb_carkit::{APPLE_VENDOR_ID, DeviceIdentity, UsbAddress, UsbConfigurationInfo};
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct FixedDiscovery(Vec<ProjectionDevice>);
+
+    impl ProjectionDeviceDiscovery for FixedDiscovery {
+        fn scan(&mut self) -> Result<Vec<ProjectionDevice>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailedDiscovery;
+
+    impl ProjectionDeviceDiscovery for FailedDiscovery {
+        fn scan(&mut self) -> Result<Vec<ProjectionDevice>> {
+            Err(Error::Runtime("transient USB scan failure".to_owned()))
+        }
+    }
+
+    fn candidate() -> ProjectionDevice {
+        ProjectionDevice::CarPlay(prelude_usb_carkit::IphoneCandidate {
+            identity: DeviceIdentity {
+                address: UsbAddress { bus: 1, address: 2 },
+                vendor_id: APPLE_VENDOR_ID,
+                product_id: 0x12a8,
+                serial_number: Some("not-exported-to-diagnostics".to_owned()),
+            },
+            active_configuration: Some(1),
+            configurations: vec![UsbConfigurationInfo {
+                value: 1,
+                interfaces: Vec::new(),
+            }],
+        })
+    }
+
+    fn test_config() -> (tempfile::TempDir, DaemonConfig) {
+        let directory = tempfile::tempdir().expect("state directory");
+        let config = DaemonConfig {
+            state_dir: directory.path().to_path_buf(),
+            ..DaemonConfig::default()
+        };
+        (directory, config)
+    }
+
+    #[test]
+    fn disabled_default_is_diagnostic_only() {
+        let (state_directory, config) = test_config();
+        let mut daemon = Daemon::new(
+            config,
+            FixedDiscovery(vec![candidate()]),
+            UnsupportedProjectionRuntime,
+        )
+        .expect("daemon");
+        let snapshot = daemon.poll().expect("poll");
+        assert_eq!(snapshot.overall, crate::OverallHealth::Disabled);
+        assert!(state_directory.path().join("daemon-heartbeat").is_file());
+        let audio_status = state_directory.path().join("audio-runtime.json");
+        assert_eq!(
+            crate::load_audio_runtime_status(&audio_status).expect("audio status"),
+            Some(AudioRuntimeSnapshot::disabled())
+        );
+        assert!(matches!(daemon.start(), Err(Error::Unsupported(_))));
+        assert!(
+            !daemon
+                .diagnostics_json()
+                .expect("json")
+                .contains("not-exported-to-diagnostics")
+        );
+    }
+
+    #[test]
+    fn enabled_projection_with_placeholder_runtime_is_not_ready() {
+        let (_state_directory, mut config) = test_config();
+        config.usb.configuration = Some(6);
+        config.usb.configuration_is_private = true;
+        config.usb.allow_configuration_changes = true;
+        config.usb.allow_private_apple_configuration = true;
+        config.usb.allow_private_lockdown_service = true;
+        config.projection.mode = ProjectionMode::ExperimentalPrivateProtocol;
+        config.projection.allow_experimental_private_protocol = true;
+        let mut daemon = Daemon::new(
+            config,
+            FixedDiscovery(vec![candidate()]),
+            UnsupportedProjectionRuntime,
+        )
+        .expect("daemon");
+        assert_eq!(
+            daemon.poll().expect("poll").overall,
+            crate::OverallHealth::NotReady
+        );
+        assert!(matches!(daemon.start(), Err(Error::Unsupported(_))));
+    }
+
+    #[test]
+    fn multiple_supported_phones_fail_closed_before_runtime_selection() {
+        let (_state_directory, mut config) = test_config();
+        config.usb.configuration = Some(6);
+        config.usb.configuration_is_private = true;
+        config.usb.allow_configuration_changes = true;
+        config.usb.allow_private_apple_configuration = true;
+        config.usb.allow_private_lockdown_service = true;
+        config.projection.mode = ProjectionMode::ExperimentalPrivateProtocol;
+        config.projection.allow_experimental_private_protocol = true;
+        let mut daemon = Daemon::new(
+            config,
+            FixedDiscovery(vec![candidate(), candidate()]),
+            UnsupportedProjectionRuntime,
+        )
+        .expect("daemon");
+
+        let snapshot = daemon.poll().expect("poll");
+        assert_eq!(
+            snapshot
+                .health
+                .components()
+                .get("projection_phone")
+                .expect("phone health")
+                .state,
+            HealthState::Failed
+        );
+        assert!(matches!(
+            daemon.start(),
+            Err(Error::NotReady {
+                component: "projection phone discovery",
+                state: "ambiguous_devices"
+            })
+        ));
+    }
+
+    #[test]
+    fn poll_fails_before_heartbeat_when_runtime_state_directory_is_unwritable() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let state_file = directory.path().join("not-a-directory");
+        std::fs::write(&state_file, b"occupied").expect("state file");
+        let config = DaemonConfig {
+            state_dir: state_file,
+            ..DaemonConfig::default()
+        };
+        let mut daemon = Daemon::new(
+            config,
+            FixedDiscovery(Vec::new()),
+            UnsupportedProjectionRuntime,
+        )
+        .expect("daemon");
+        assert!(matches!(daemon.poll(), Err(Error::AudioStatus { .. })));
+    }
+
+    #[test]
+    fn transient_discovery_failure_does_not_stale_the_daemon_heartbeat() {
+        let (state_directory, config) = test_config();
+        let mut daemon =
+            Daemon::new(config, FailedDiscovery, UnsupportedProjectionRuntime).expect("daemon");
+
+        let snapshot = daemon.poll().expect("poll remains live");
+        assert_eq!(
+            snapshot
+                .health
+                .components()
+                .get("usb_discovery")
+                .expect("discovery health")
+                .state,
+            HealthState::Failed
+        );
+        assert_eq!(
+            snapshot
+                .health
+                .components()
+                .get("daemon_heartbeat")
+                .expect("heartbeat health")
+                .state,
+            HealthState::Ready
+        );
+        assert!(state_directory.path().join("daemon-heartbeat").is_file());
+    }
+
+    #[derive(Debug)]
+    struct ReconnectRuntime {
+        ready: Arc<AtomicBool>,
+        starts: Arc<AtomicUsize>,
+        stops: Arc<AtomicUsize>,
+    }
+
+    impl ProjectionRuntime for ReconnectRuntime {
+        fn probe(&mut self) -> RuntimeProbe {
+            RuntimeProbe {
+                state: HealthState::Unsupported,
+                detail: "projection unavailable".to_owned(),
+                transport_state: if self.ready.load(Ordering::SeqCst) {
+                    HealthState::Ready
+                } else {
+                    HealthState::NotReady
+                },
+                transport_detail: "test transport".to_owned(),
+                link_state: HealthState::NotReady,
+                link_detail: "test link".to_owned(),
+                control_state: HealthState::NotReady,
+                control_detail: "test control".to_owned(),
+                authentication_state: HealthState::NotReady,
+                authentication_detail: "test authentication".to_owned(),
+                session_state: HealthState::NotReady,
+                session_detail: "test session".to_owned(),
+                implementation: ImplementationStatus::Unsupported,
+                capabilities: ProjectionCapabilities::default(),
+            }
+        }
+
+        fn start(&mut self, _device: &ProjectionDevice) -> Result<()> {
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            self.ready.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn stop(&mut self) -> Result<()> {
+            self.stops.fetch_add(1, Ordering::SeqCst);
+            self.ready.store(false, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn carrier_maintenance_connects_once_then_observes_readiness() {
+        let (_state_directory, mut config) = test_config();
+        config.usb.configuration = Some(6);
+        config.usb.configuration_is_private = true;
+        config.usb.allow_configuration_changes = true;
+        config.usb.allow_private_apple_configuration = true;
+        config.usb.allow_private_lockdown_service = true;
+        config.projection.mode = ProjectionMode::ExperimentalPrivateProtocol;
+        config.projection.allow_experimental_private_protocol = true;
+        let ready = Arc::new(AtomicBool::new(false));
+        let starts = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(AtomicUsize::new(0));
+        let runtime = ReconnectRuntime {
+            ready: Arc::clone(&ready),
+            starts: Arc::clone(&starts),
+            stops: Arc::clone(&stops),
+        };
+        let mut daemon =
+            Daemon::new(config, FixedDiscovery(vec![candidate()]), runtime).expect("daemon");
+        daemon.poll().expect("poll");
+        assert!(daemon.maintain_projection().expect("first connect"));
+        assert!(!daemon.maintain_projection().expect("already connected"));
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn runtime_replacement_stops_the_old_session_before_installing_candidate() {
+        let (_state_directory, mut config) = test_config();
+        config.usb.configuration = Some(6);
+        config.usb.configuration_is_private = true;
+        config.usb.allow_configuration_changes = true;
+        config.usb.allow_private_apple_configuration = true;
+        config.usb.allow_private_lockdown_service = true;
+        config.projection.mode = ProjectionMode::ExperimentalPrivateProtocol;
+        config.projection.allow_experimental_private_protocol = true;
+        let ready = Arc::new(AtomicBool::new(false));
+        let starts = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(AtomicUsize::new(0));
+        let runtime = ReconnectRuntime {
+            ready: Arc::clone(&ready),
+            starts: Arc::clone(&starts),
+            stops: Arc::clone(&stops),
+        };
+        let mut daemon = Daemon::new(config.clone(), FixedDiscovery(vec![candidate()]), runtime)
+            .expect("daemon");
+        daemon.poll().expect("poll");
+        assert!(daemon.maintain_projection().expect("connect"));
+
+        let replacement_ready = Arc::new(AtomicBool::new(false));
+        let replacement_starts = Arc::new(AtomicUsize::new(0));
+        let replacement = ReconnectRuntime {
+            ready: Arc::clone(&replacement_ready),
+            starts: Arc::clone(&replacement_starts),
+            stops: Arc::new(AtomicUsize::new(0)),
+        };
+        daemon
+            .replace_projection_runtime(config, replacement)
+            .expect("replace runtime");
+
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+        assert!(!ready.load(Ordering::SeqCst));
+        assert!(daemon.maintain_projection().expect("connect replacement"));
+        assert_eq!(replacement_starts.load(Ordering::SeqCst), 1);
+    }
+}

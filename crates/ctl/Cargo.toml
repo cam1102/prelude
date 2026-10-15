@@ -1,0 +1,32 @@
+[package]
+name = "preludectl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "preludectl"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+preluded = { path = "../daemon", default-features = false }
+nix.workspace = true
+platform-superbird = { path = "../platform-superbird" }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+prelude-mfi = { path = "../mfi" }
+p256.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

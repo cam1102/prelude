@@ -1,0 +1,16 @@
+[Unit]
+Description=Retry restoration of the no-UART USB-device recovery path
+After=local-fs.target systemd-modules-load.service
+ConditionPathExists=/var/lib/prelude/device-recovery-required
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 5
+ExecStart=/usr/bin/preludectl recover-if-required
+Restart=on-failure
+RestartSec=60s
+TimeoutStartSec=15s
+
+[Install]
+WantedBy=multi-user.target

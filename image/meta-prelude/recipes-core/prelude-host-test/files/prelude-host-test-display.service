@@ -1,0 +1,17 @@
+[Unit]
+Description=Display the Car Thing USB-host test status
+After=superbird-weston.service
+Wants=superbird-weston.service
+Before=prelude-host-test.service
+
+[Service]
+Type=simple
+Environment=WAYLAND_DISPLAY=wayland-1
+Environment=XDG_RUNTIME_DIR=/run/weston
+ExecStart=/usr/bin/weston-terminal --fullscreen --font-size=28 --shell=/usr/libexec/prelude-host-test-display
+Restart=on-failure
+RestartSec=1s
+TimeoutStopSec=5s
+
+[Install]
+WantedBy=multi-user.target

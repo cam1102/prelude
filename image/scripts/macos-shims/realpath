@@ -1,0 +1,8 @@
+#!/bin/sh
+# kas-container uses GNU-only realpath flags that macOS realpath rejects.
+if command -v grealpath >/dev/null 2>&1; then
+    exec grealpath "$@"
+fi
+echo "realpath: GNU realpath not found; run 'brew install coreutils'" >&2
+exit 127
+

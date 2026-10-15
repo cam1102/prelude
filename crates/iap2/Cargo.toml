@@ -1,0 +1,21 @@
+[package]
+name = "prelude-iap2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Transport-neutral iAP2 framing and wired CarPlay control-session core"
+publish = false
+
+[dependencies]
+bitflags.workspace = true
+bytes.workspace = true
+prelude-mfi = { path = "../mfi" }
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

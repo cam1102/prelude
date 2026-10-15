@@ -1,0 +1,161 @@
+# Prelude Yocto image workflow
+
+default:
+    @just --list
+
+export KAS_CONTAINER_ENGINE := env_var_or_default("KAS_CONTAINER_ENGINE", "docker")
+
+macos_shim_dir := if os() == "macos" { justfile_directory() / "scripts" / "macos-shims" } else { "" }
+export PATH := if macos_shim_dir == "" { env_var("PATH") } else { macos_shim_dir + ":" + env_var("PATH") }
+
+# BitBake needs reliable POSIX locks and a case-sensitive filesystem. Docker
+# Desktop bind mounts provide neither consistently, so macOS keeps TOPDIR and
+# ccache in an ext4-backed named volume and mirrors deploy artifacts afterward.
+build_vol := if os() == "macos" { "prelude-yocto" } else { "" }
+macos_runtime_args := if os() == "macos" { "-e KAS_DOCKER_ROOTLESS=1 -e KAS_BUILD_DIR=/build/build -v " + build_vol + ":/build" } else { "" }
+
+export KAS_BUILD_DIR := if os() == "macos" { "" } else { env_var_or_default("YOCTO_BUILD_DIR", "") }
+build_dir := if KAS_BUILD_DIR == "" { justfile_directory() / "build" } else { KAS_BUILD_DIR }
+
+monorepo_dir := parent_directory(justfile_directory())
+monorepo_mount := "/monorepo"
+flashthing := env_var_or_default("FLASHTHING_CLI", "flashthing-cli")
+
+[macos]
+macos-setup:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v grealpath >/dev/null 2>&1 || { echo "Installing coreutils (GNU realpath)..."; brew install coreutils; }
+    if docker volume inspect {{ build_vol }} >/dev/null 2>&1; then
+      echo "Docker build volume '{{ build_vol }}' already exists"
+    else
+      echo "Creating Docker build volume '{{ build_vol }}'..."
+      docker volume create {{ build_vol }} >/dev/null
+    fi
+    echo "OK - 'just build' uses volume '{{ build_vol }}' and mirrors deploy artifacts to {{ build_dir }}/tmp/deploy"
+
+checkout target="prelude-prod-local":
+    scripts/kas-run checkout "{{ target }}" "{{ build_vol }}"
+
+build target="prelude-prod-local":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    scripts/kas-run build "{{ target }}" "{{ build_vol }}"
+    if [ "$(uname)" = "Darwin" ]; then
+      just pull-deploy
+    fi
+
+shell target="prelude-prod-local":
+    scripts/kas-run shell "{{ target }}" "{{ build_vol }}"
+
+parse target="prelude-prod-local":
+    scripts/kas-run parse "{{ target }}" "{{ build_vol }}"
+
+# macOS only: mirror deploy artifacts out of the build volume, then prune only
+# disposable final outputs. The IPK feed and image-input artifacts stay in Docker
+# so BitBake can continue incremental builds.
+[macos]
+pull-deploy:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{ build_dir }}/tmp/deploy"
+    docker run --rm -v {{ build_vol }}:/build -v "{{ build_dir }}/tmp/deploy":/out alpine sh -c '
+      set -eu
+      deploy=/build/build/tmp/deploy
+      if [ ! -d "$deploy" ]; then echo "no deploy dir in volume {{ build_vol }} yet"; exit 0; fi
+      if [ -z "$(find "$deploy" -mindepth 1 -print -quit)" ]; then echo "no deploy artifacts in volume {{ build_vol }}"; exit 0; fi
+      apk add --no-cache rsync >/dev/null 2>&1
+      rsync -a --delete "$deploy"/ /out/
+      find "$deploy" -type f \( \
+        -name "*.wic" -o \
+        -name "*.wic.*" -o \
+        -name "*.ext4" -o \
+        -name "*.squashfs" -o \
+        -name "*.swu" -o \
+        -iname "*flashthing*.zip" -o \
+        -name "*.manifest" -o \
+        -name "*.testdata.json" \
+      \) -delete
+      echo "mirrored $(find /out -type f | wc -l | tr -d " ") files and pruned disposable image outputs"'
+    runtime_args="{{ macos_runtime_args }} -v {{ monorepo_dir }}:{{ monorepo_mount }}"
+    kas-container --runtime-args "$runtime_args" --repo-ro shell -c \
+      'bitbake -c clean prelude-dev-image prelude-prod-image prelude-usb-host-test-image' \
+      kas/prelude-prod-local.yml
+    echo "deploy artifacts on disk at {{ build_dir }}/tmp/deploy"
+
+# Wipe BitBake output while retaining checked-out layers and the compiler cache.
+clean-build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    build_path="{{ build_dir }}"
+    case "$build_path" in
+      ""|"/"|".")
+        echo "Refusing to remove unsafe build path: $build_path" >&2
+        exit 2
+        ;;
+    esac
+    if [ "$(uname)" = "Darwin" ]; then
+      docker run --rm -v {{ build_vol }}:/build alpine rm -rf /build/build
+    fi
+    rm -rf "$build_path"
+
+# Drop poky-layout symlinks under sources/ for the VS Code BitBake extension.
+vscode-setup:
+    test -d sources/openembedded-core || just checkout
+    ln -sfn openembedded-core/meta sources/meta
+    ln -sfn meta-yocto/meta-poky sources/meta-poky
+    @echo "symlinks ready: sources/{meta,meta-poky}"
+
+# --- Cache server ---
+
+r2_endpoint := "https://0a665ba1f35a38354b3f623be13f14bd.r2.cloudflarestorage.com"
+sstate_remote := "r2:bridgething-sstate/sstate"
+r2_creds := env_var_or_default('CARTHING_R2_CREDS', '/tmp/carthing-r2-creds.env')
+
+# Upload this build's new sstate objects to the public mirror.
+push-sstate:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/sstate-rclone-env {{ r2_creds }} {{ r2_endpoint }}
+    args=(copy --ignore-existing --fast-list --transfers 8 --checkers 16 --stats 30s --stats-one-line
+      --exclude '*.lock' --exclude 'sstate:bridgething-daemon:*' --exclude 'sstate:bridgething-webapps:*')
+    manifest=$(mktemp)
+    trap 'rm -f "$manifest"' EXIT
+    stamp_hashes='find /build/build/tmp/stamps {{ build_dir }}/tmp/stamps -type f \( -name "*.do_*.sigdata.*" -o -name "*.do_*_setscene.*" \) 2>/dev/null | sed -E "s/.*(sigdata|_setscene)\\.//; s/\\..*//" | sort -u'
+    if [ "$(uname)" = "Darwin" ]; then
+      docker run --rm -v {{ build_vol }}:/build "${RCLONE_DOCKER_ENV[@]}" rclone/rclone \
+        "${args[@]}" /build/build/sstate-cache {{ sstate_remote }}
+      docker run --rm -v {{ build_vol }}:/build alpine sh -c "$stamp_hashes" > "$manifest"
+      arch=$(docker run --rm alpine uname -m)
+    else
+      rclone "${args[@]}" {{ build_dir }}/sstate-cache {{ sstate_remote }}
+      sh -c "$stamp_hashes" > "$manifest"
+      arch=$(uname -m)
+    fi
+
+    [ -s "$manifest" ] || { echo "no stamps under tmp/stamps; not publishing a manifest" >&2; exit 1; }
+    # The manifest is what the mirror's garbage collector keeps; only a green build should publish one.
+    rclone copyto "$manifest" "r2:bridgething-sstate/manifests/$arch/$(date -u +%Y%m%dT%H%M%SZ).txt"
+    echo "published manifest: $(wc -l < "$manifest" | tr -d ' ') live hashes for $arch" >&2
+
+flash image="prelude-prod-image":
+    {{ flashthing }} {{ build_dir }}/tmp/deploy/images/superbird/{{ image }}-superbird-flashthing.zip
+
+flash-env image="prelude-prod-image":
+    {{ flashthing }} {{ build_dir }}/tmp/deploy/images/superbird/{{ image }}-superbird-flashthing-env-only.zip
+
+lint: test
+    #!/usr/bin/env bash
+    set -euo pipefail
+    python3 scripts/validate-layer.py
+    if command -v shellcheck >/dev/null 2>&1; then
+      shellcheck scripts/kas-run scripts/macos-shims/realpath
+    fi
+    if command -v yamllint >/dev/null 2>&1; then
+      yamllint kas
+    fi
+
+test:
+    python3 tests/test-systemd-units.py
+    tests/test-usb-role-helper.sh
+    tests/test-session-recovery.sh

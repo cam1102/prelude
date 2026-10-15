@@ -1,0 +1,20 @@
+[package]
+name = "prelude-mfi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Apple Authentication 3.0 coprocessor driver for the Car Thing CarPlay project"
+publish = false
+
+[target.'cfg(target_os = "linux")'.dependencies]
+fs2.workspace = true
+i2cdev.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

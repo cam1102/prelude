@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$#" -ne 3 ]; then
+  echo "usage: kas-run <checkout|build|shell|parse> <target> <build-volume>" >&2
+  exit 2
+fi
+
+operation=$1
+target=$2
+build_volume=$3
+case "$operation" in
+  checkout|build|shell|parse) ;;
+  *) echo "unsupported KAS operation: $operation" >&2; exit 2 ;;
+esac
+
+image_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+monorepo_dir=$(dirname "$image_dir")
+cd "$image_dir"
+
+if [ -z "${NETRC_FILE:-}" ] && [ -n "${HOME:-}" ] && [ -f "$HOME/.netrc" ]; then
+  export NETRC_FILE="$HOME/.netrc"
+fi
+if [ -n "${NETRC_FILE:-}" ] && [ ! -f "$NETRC_FILE" ]; then
+  echo "NETRC_FILE is set but is not a file: $NETRC_FILE" >&2
+  exit 1
+fi
+
+runtime_args=""
+if [ "$operation" != checkout ]; then
+  if [ "$(uname)" = Darwin ]; then
+    docker volume inspect "$build_volume" >/dev/null 2>&1 || docker volume create "$build_volume" >/dev/null
+    runtime_args="-e KAS_DOCKER_ROOTLESS=1 -e KAS_BUILD_DIR=/build/build -v $build_volume:/build"
+  elif [ "$operation" = build ] && [ -n "${KAS_BUILD_DIR:-}" ]; then
+    mkdir -p "$KAS_BUILD_DIR"
+  fi
+  case "$target" in
+    *-local) runtime_args="$runtime_args -v $monorepo_dir:/monorepo" ;;
+  esac
+  for variable in PRELUDE_MONOREPO_SRC_URI PRELUDE_MONOREPO_SRCREV PRELUDE_WIRELESS_COUNTRY PRELUDE_WIRELESS_PASSPHRASE; do
+    if [ -n "${!variable:-}" ]; then
+      runtime_args="$runtime_args -e $variable"
+    fi
+  done
+fi
+
+args=()
+if [ -n "$runtime_args" ]; then
+  args+=(--runtime-args "$runtime_args")
+fi
+if [ "$operation" = parse ]; then
+  args+=(shell -c 'bitbake -p && bitbake-layers show-appends')
+else
+  args+=("$operation")
+fi
+exec kas-container "${args[@]}" "kas/$target.yml"
