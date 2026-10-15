@@ -240,6 +240,7 @@ enum Item {
     Density,
     PhoneAudio,
     Equalizer,
+    Version,
     Phone(usize),
     Connect,
     Forget,
@@ -440,6 +441,7 @@ struct SettingsUi<D> {
     ambient_light: Option<AmbientLightControl>,
     directory: Option<WirelessPhoneDirectory>,
     wireless: bool,
+    version: String,
     phones: Vec<KnownPhone>,
     active_phone: Option<String>,
     opened_phone: Option<String>,
@@ -489,6 +491,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
             ambient_light,
             wireless: directory.is_some(),
             directory,
+            version: system_version(),
             phones: Vec::new(),
             active_phone: None,
             opened_phone: None,
@@ -606,7 +609,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
                     vec![Item::AutoBrightness, Item::AutoNightMode, Item::Density],
                 ),
                 Section::titled("Audio", vec![Item::PhoneAudio, Item::Equalizer]),
-                Section::titled("Advanced", vec![Item::Wifi]),
+                Section::titled("Advanced", vec![Item::Wifi, Item::Version]),
             ],
             Page::Phones => vec![Section::plain(
                 (0..self.phones.len()).map(Item::Phone).collect(),
@@ -883,6 +886,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
             Item::Density => self.enter(Page::Density),
             Item::PhoneAudio => self.toggle_phone_audio(),
             Item::Equalizer => self.enter(Page::Equalizer),
+            Item::Version => {}
             Item::Phone(index) => self.open_phone(index),
             Item::Connect => self.connect_opened_phone(),
             Item::Forget => self.forget_opened_phone(),
@@ -1524,6 +1528,9 @@ impl<D: OverlaySurface> SettingsUi<D> {
                 "Equalizer",
                 Trailing::Link(on_off(self.equalizer_ui.settings.enabled), SECONDARY),
             ),
+            Item::Version => {
+                RowView::new("Version", Trailing::Value(self.version.clone(), SECONDARY))
+            }
             Item::Phone(index) => {
                 let Some(phone) = self.phones.get(index) else {
                     return RowView::new("", Trailing::None);
@@ -1580,6 +1587,21 @@ impl<D: OverlaySurface> SettingsUi<D> {
             Item::DensitySlider => RowView::new("Density", Trailing::None),
         }
     }
+}
+
+fn system_version() -> String {
+    fs::read_to_string("/etc/os-release")
+        .ok()
+        .and_then(|contents| os_release_version(&contents))
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned())
+}
+
+fn os_release_version(contents: &str) -> Option<String> {
+    contents
+        .lines()
+        .find_map(|line| line.strip_prefix("VERSION_ID="))
+        .map(|value| value.trim().trim_matches('"').to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 const fn band_name(band: Band) -> &'static str {
@@ -2272,6 +2294,16 @@ mod tests {
     }
 
     #[test]
+    fn version_comes_from_os_release() {
+        assert_eq!(
+            os_release_version("ID=prelude\nVERSION_ID=\"1.0.0\"\n").as_deref(),
+            Some("1.0.0")
+        );
+        assert_eq!(os_release_version("VERSION_ID=\"\"\n"), None);
+        assert_eq!(os_release_version("ID=prelude\n"), None);
+    }
+
+    #[test]
     fn dpi_slider_clamps_and_snaps_to_ten() {
         assert_eq!(dpi_from_x(0), MIN_DPI);
         assert_eq!(dpi_from_x(SLIDER_X + SLIDER_WIDTH), MAX_DPI);
@@ -2291,7 +2323,7 @@ mod tests {
             assert!(pair[0].bottom() <= pair[1].top, "{pair:?}");
         }
         let last = layout.rows.last().expect("rows");
-        assert_eq!(last.item, Item::Wifi);
+        assert_eq!(last.item, Item::Version);
         assert_eq!(
             last.bottom() + SECTION_GAP - layout.maximum_scroll(),
             DISPLAY_HEIGHT as i32
@@ -2609,7 +2641,7 @@ mod tests {
         capture(&harness, "settings-scrolled");
         harness.focus(Item::PhoneAudio);
         harness.press(KnobInputButton::Select);
-        harness.focus(Item::Wifi);
+        harness.focus(Item::Version);
         capture(&harness, "settings-bottom");
         harness.focus(Item::Equalizer);
         harness.press(KnobInputButton::Select);
