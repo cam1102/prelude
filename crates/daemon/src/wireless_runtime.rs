@@ -19,7 +19,7 @@ use platform_superbird::{AccessoryIdentitySource, SuperbirdIdentitySource};
 use prelude_wireless::{
     access_point::{self, AccessPoint, AccessPointConfig, ChannelWidth, StationControl},
     bluez::{
-        BluetoothConfig, BluetoothControl, BluetoothService, PhoneKind, RfcommConnection,
+        self, BluetoothConfig, BluetoothControl, BluetoothService, PhoneKind, RfcommConnection,
         RfcommProfile,
     },
     hfp, wpp,
@@ -477,6 +477,7 @@ impl WirelessService {
         let bluetooth_control = SharedBluetoothControl::default();
         let radio = Arc::new(RwLock::new((wireless.channel, wireless.channel_width_mhz)));
         let phone_audio = Arc::new(AtomicBool::new(config.android_auto.disable_audio_output));
+        let wifi_present = Arc::new(AtomicBool::new(wifi_interface(wireless).is_some()));
         let stop = Arc::new(AtomicBool::new(false));
         let state_dir = wireless_state_dir(&config.state_dir);
         let directory = WirelessPhoneDirectory {
@@ -504,6 +505,7 @@ impl WirelessService {
             };
             let access_point = Arc::clone(&access_point);
             let radio = Arc::clone(&radio);
+            let wifi_present = Arc::clone(&wifi_present);
             let stop = Arc::clone(&stop);
             move || {
                 supervise_access_point(
@@ -512,6 +514,7 @@ impl WirelessService {
                     &projection,
                     &access_point,
                     &radio,
+                    &wifi_present,
                     &stop,
                 );
             }
@@ -536,6 +539,7 @@ impl WirelessService {
                 dismissed: Arc::clone(&directory.dismissed),
                 directory: directory.clone(),
                 phone_audio: Arc::clone(&phone_audio),
+                wifi_present,
                 state_dir,
                 stop: Arc::clone(&stop),
             };
@@ -632,6 +636,7 @@ fn supervise_access_point(
     projection: &ProjectionListener,
     shared: &SharedAccessPoint,
     radio: &SharedRadio,
+    wifi_present: &AtomicBool,
     stop: &AtomicBool,
 ) {
     let mut waiting_logged = false;
@@ -642,11 +647,8 @@ fn supervise_access_point(
             channel_width_mhz,
             ..wireless.clone()
         };
-        let interface = match &wireless.wifi_interface {
-            Some(interface) => Some(interface.clone())
-                .filter(|interface| Path::new("/sys/class/net").join(interface).exists()),
-            None => prelude_wireless::access_point::detect_interface(),
-        };
+        let interface = wifi_interface(&wireless);
+        wifi_present.store(interface.is_some(), Ordering::Relaxed);
         let Some(interface) = interface else {
             if !waiting_logged {
                 tracing::info!("waiting for a USB Wi-Fi adapter");
@@ -674,6 +676,14 @@ fn supervise_access_point(
             continue;
         }
         sleep_unless_stopped(stop, ACCESS_POINT_RETRY);
+    }
+}
+
+fn wifi_interface(wireless: &WirelessConfig) -> Option<String> {
+    match &wireless.wifi_interface {
+        Some(interface) => Some(interface.clone())
+            .filter(|interface| Path::new("/sys/class/net").join(interface).exists()),
+        None => access_point::detect_interface(),
     }
 }
 
@@ -953,6 +963,7 @@ struct BluetoothDispatch {
     dismissed: SharedDismissed,
     directory: WirelessPhoneDirectory,
     phone_audio: Arc<AtomicBool>,
+    wifi_present: Arc<AtomicBool>,
     state_dir: PathBuf,
     stop: Arc<AtomicBool>,
 }
@@ -960,6 +971,10 @@ struct BluetoothDispatch {
 impl BluetoothDispatch {
     fn run(&self, bluetooth: &BluetoothConfig) {
         while !self.stop.load(Ordering::Relaxed) {
+            if !self.has_wifi() {
+                self.power_off_until_wifi(&bluetooth.adapter);
+                continue;
+            }
             let (service, incoming) = match BluetoothService::start(bluetooth.clone()) {
                 Ok(started) => started,
                 Err(error) => {
@@ -975,7 +990,7 @@ impl BluetoothDispatch {
                 *control = Some(service.control());
             }
             let mut next_page = Instant::now() + RECONNECT_DELAY;
-            while !self.stop.load(Ordering::Relaxed) && service.is_running() {
+            while !self.stop.load(Ordering::Relaxed) && service.is_running() && self.has_wifi() {
                 match incoming.recv_timeout(Duration::from_millis(500)) {
                     Ok(connection) => self.accept(connection),
                     Err(RecvTimeoutError::Timeout) => {}
@@ -993,6 +1008,35 @@ impl BluetoothDispatch {
                 *control = None;
             }
             drop(service);
+        }
+    }
+
+    fn has_wifi(&self) -> bool {
+        self.wifi_present.load(Ordering::Relaxed)
+    }
+
+    fn power_off_until_wifi(&self, adapter: &str) {
+        let mut powered_off = false;
+        let mut next_attempt = Instant::now();
+        while !self.stop.load(Ordering::Relaxed) && !self.has_wifi() {
+            if !powered_off && Instant::now() >= next_attempt {
+                match bluez::power_off(adapter) {
+                    Ok(()) => {
+                        tracing::info!(
+                            "no Wi-Fi adapter; Bluetooth is off until one is plugged in"
+                        );
+                        powered_off = true;
+                    }
+                    Err(error) => {
+                        tracing::debug!(%error, "turning Bluetooth off failed; retrying");
+                        next_attempt = Instant::now() + BLUETOOTH_RETRY;
+                    }
+                }
+            }
+            thread::sleep(SUPERVISOR_POLL);
+        }
+        if powered_off && !self.stop.load(Ordering::Relaxed) {
+            tracing::info!("Wi-Fi adapter found; turning Bluetooth back on");
         }
     }
 

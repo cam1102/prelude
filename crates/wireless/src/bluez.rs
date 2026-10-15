@@ -277,6 +277,26 @@ impl BluetoothService {
     }
 }
 
+pub fn power_off(adapter: &str) -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| Error::io_context("building the BlueZ runtime", error))?;
+    runtime.block_on(async {
+        let connection = Connection::system().await?;
+        let powered_off = set_property(
+            &connection,
+            &format!("/org/bluez/{adapter}"),
+            "org.bluez.Adapter1",
+            "Powered",
+            Value::from(false),
+        )
+        .await;
+        let _ = connection.close().await;
+        powered_off
+    })
+}
+
 impl BluetoothService {
     pub const fn address(&self) -> [u8; 6] {
         self.address
