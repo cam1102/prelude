@@ -53,8 +53,6 @@ impl OutputEqualizer {
                 .ok_or_else(|| Error::Backend("equalizer band is missing".to_owned()))?;
             set_enum_checked(&band, "type", "peak")?;
             set_checked(&band, "freq", frequency)?;
-            // One octave wide: upper/lower edges at f * sqrt(2) and f / sqrt(2).
-            // GStreamer bandwidth is a width in Hz, not an octave/Q value.
             set_checked(
                 &band,
                 "bandwidth",
@@ -117,7 +115,6 @@ impl OutputEqualizer {
         let fraction =
             (now.duration_since(self.started).as_secs_f64() / RAMP_DURATION.as_secs_f64()).min(1.0);
         if fraction >= 1.0 {
-            // Land exactly on target so floating-point cancellation cannot keep idle updates alive.
             self.current = self.target;
         } else {
             for index in 0..self.current.len() {

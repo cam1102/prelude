@@ -32,64 +32,47 @@ const MAXIMUM_FONT_BYTES: u64 = 8 * 1024 * 1024;
 const SETTINGS_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const INPUT_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const PHONES_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
-const ROW_X: i32 = 32;
-const ROW_WIDTH: i32 = 736;
-const ROW_INSET: i32 = 24;
-const ROW_GAP: i32 = 12;
-const CONTENT_X: i32 = ROW_X + ROW_INSET;
-const CONTENT_RIGHT: i32 = ROW_X + ROW_WIDTH - ROW_INSET;
+const HEADER_HEIGHT: i32 = 84;
+const VIEWPORT_TOP: i32 = HEADER_HEIGHT;
 const TITLE_Y: i32 = 44;
-const TITLE_SIZE: f32 = 40.0;
-const LABEL_SIZE: f32 = 32.0;
+const TITLE_X: i32 = 32;
+const BACK_X: i32 = 34;
+const BACK_TITLE_X: i32 = 64;
+const GROUP_X: i32 = 24;
+const GROUP_WIDTH: i32 = DISPLAY_WIDTH as i32 - GROUP_X * 2;
+const GROUP_RADIUS: i32 = 18;
+const ROW_INSET: i32 = 24;
+const CONTENT_X: i32 = GROUP_X + ROW_INSET;
+const CONTENT_RIGHT: i32 = GROUP_X + GROUP_WIDTH - ROW_INSET;
+const ROW_HEIGHT: i32 = 84;
+const SLIDER_ROW_HEIGHT: i32 = 140;
+const CAPTION_HEIGHT: i32 = 44;
+const FOOTER_HEIGHT: i32 = 44;
+const SECTION_GAP: i32 = 12;
+const CONTROL_GAP: i32 = 16;
+const TITLE_SIZE: f32 = 38.0;
+const LABEL_SIZE: f32 = 31.0;
 const VALUE_SIZE: f32 = 28.0;
-const CAPTION_SIZE: f32 = 16.0;
-const ROW_TEXT_CENTER: i32 = TOGGLE_ROW_HEIGHT / 2;
-const SWITCH_WIDTH: i32 = 80;
+const DETAIL_SIZE: f32 = 20.0;
+const CAPTION_SIZE: f32 = 19.0;
+const SWITCH_WIDTH: i32 = 76;
 const SWITCH_HEIGHT: i32 = 44;
-const SWITCH_X: i32 = CONTENT_RIGHT - SWITCH_WIDTH;
-const CONTROL_GAP: i32 = 24;
-const TOGGLE_ROW_HEIGHT: i32 = 72;
-const DPI_ROW_HEIGHT: i32 = 120;
-const RESTORE_ROW_HEIGHT: i32 = TOGGLE_ROW_HEIGHT;
-const PHONES_ROW_HEIGHT: i32 = TOGGLE_ROW_HEIGHT;
-const FIRST_ROW_Y: i32 = 80;
-const VIEWPORT_TOP: i32 = FIRST_ROW_Y;
+const SLIDER_X: i32 = CONTENT_X;
+const SLIDER_WIDTH: i32 = CONTENT_RIGHT - CONTENT_X;
+const SLIDER_TRACK_OFFSET: i32 = 86;
 const DRAG_THRESHOLD: i32 = 12;
-const PHONES_ROW: usize = 0;
-const PHONES_ROW_Y: i32 = FIRST_ROW_Y;
-const AUTO_BRIGHTNESS_ROW: usize = 1;
-const AUTO_BRIGHTNESS_ROW_Y: i32 = PHONES_ROW_Y + PHONES_ROW_HEIGHT + ROW_GAP;
-const AUTO_NIGHT_MODE_ROW: usize = 2;
-const AUTO_NIGHT_MODE_ROW_Y: i32 = AUTO_BRIGHTNESS_ROW_Y + TOGGLE_ROW_HEIGHT + ROW_GAP;
-const PHONE_AUDIO_ROW: usize = 3;
-const PHONE_AUDIO_ROW_Y: i32 = AUTO_NIGHT_MODE_ROW_Y + TOGGLE_ROW_HEIGHT + ROW_GAP;
-const EQUALIZER_ROW: usize = 4;
-const EQUALIZER_ROW_Y: i32 = PHONE_AUDIO_ROW_Y + TOGGLE_ROW_HEIGHT + ROW_GAP;
-const DPI_ROW: usize = 5;
-const DPI_ROW_Y: i32 = EQUALIZER_ROW_Y + TOGGLE_ROW_HEIGHT + ROW_GAP;
-const RESTORE_DPI_ROW: usize = 6;
-const RESTORE_DPI_ROW_Y: i32 = DPI_ROW_Y + DPI_ROW_HEIGHT + ROW_GAP;
-const ADVANCED_ROW: usize = 7;
-const ADVANCED_ROW_Y: i32 = RESTORE_DPI_ROW_Y + RESTORE_ROW_HEIGHT + ROW_GAP;
-const ADVANCED_ROW_HEIGHT: i32 = TOGGLE_ROW_HEIGHT;
-const SLIDER_X: i32 = ROW_X + ROW_INSET;
-const SLIDER_WIDTH: i32 = ROW_WIDTH - ROW_INSET * 2;
-const LIST_ROW_HEIGHT: i32 = TOGGLE_ROW_HEIGHT;
-const CONNECT_ROW: usize = 0;
-const FORGET_ROW: usize = 1;
-const PHONE_ACTION_ROWS: usize = 2;
-const WIFI_BAND_ROW: usize = 0;
-const WIFI_CHANNEL_ROW: usize = 1;
-const WIFI_WIDTH_ROW: usize = 2;
-const WIFI_ROWS: usize = 3;
 const BANDS: [Band; 2] = [Band::Ghz2_4, Band::Ghz5];
 const MIN_DPI: u32 = prelude_android_auto_protocol::MIN_VIDEO_DENSITY_DPI;
 const MAX_DPI: u32 = prelude_android_auto_protocol::MAX_VIDEO_DENSITY_DPI;
 const DPI_STEP: u32 = 10;
+const GROUP: [u8; 3] = [28, 28, 30];
+const FOCUS: [u8; 3] = [58, 58, 62];
+const DIVIDER: [u8; 3] = [46, 46, 50];
+const TRACK: [u8; 3] = [72, 72, 76];
 const GREEN: [u8; 3] = [30, 215, 96];
-const RED: [u8; 3] = [254, 59, 48];
+const RED: [u8; 3] = [255, 69, 58];
 const WHITE: [u8; 3] = [255, 255, 255];
-const SECONDARY: [u8; 3] = [178, 178, 178];
+const SECONDARY: [u8; 3] = [152, 152, 158];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SettingsCommitted {
@@ -170,7 +153,27 @@ impl Drop for HostUi {
     }
 }
 
-fn run_host_ui(mut ui: SettingsUi, stop: &AtomicBool) {
+trait OverlaySurface {
+    fn set_overlay(&self, frame: Vec<u8>) -> prelude_media::Result<()>;
+    fn clear_overlay(&self) -> prelude_media::Result<()>;
+    fn set_host_ui_active(&self, active: bool) -> prelude_media::Result<()>;
+}
+
+impl OverlaySurface for LinuxDisplayHandle {
+    fn set_overlay(&self, frame: Vec<u8>) -> prelude_media::Result<()> {
+        Self::set_overlay(self, frame)
+    }
+
+    fn clear_overlay(&self) -> prelude_media::Result<()> {
+        Self::clear_overlay(self)
+    }
+
+    fn set_host_ui_active(&self, active: bool) -> prelude_media::Result<()> {
+        Self::set_host_ui_active(self, active)
+    }
+}
+
+fn run_host_ui(mut ui: SettingsUi<impl OverlaySurface>, stop: &AtomicBool) {
     let mut input = None;
     while !stop.load(Ordering::Acquire) {
         if input.is_none() {
@@ -223,14 +226,202 @@ enum Page {
     Settings,
     Phones,
     Phone,
-    Advanced,
+    Density,
+    Wifi,
     Equalizer,
 }
 
-struct SettingsUi {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Item {
+    Phones,
+    Wifi,
+    AutoBrightness,
+    AutoNightMode,
+    Density,
+    PhoneAudio,
+    Equalizer,
+    Phone(usize),
+    Connect,
+    Forget,
+    DensitySlider,
+    DensityReset,
+    WifiBand,
+    WifiChannel,
+    WifiWidth,
+}
+
+impl Item {
+    const fn adjustable(self) -> bool {
+        matches!(
+            self,
+            Self::DensitySlider | Self::WifiBand | Self::WifiChannel | Self::WifiWidth
+        )
+    }
+
+    const fn height(self) -> i32 {
+        match self {
+            Self::DensitySlider => SLIDER_ROW_HEIGHT,
+            _ => ROW_HEIGHT,
+        }
+    }
+}
+
+struct Section {
+    title: Option<String>,
+    items: Vec<Item>,
+    footer: Option<&'static str>,
+}
+
+impl Section {
+    fn titled(title: impl Into<String>, items: Vec<Item>) -> Self {
+        Self {
+            title: Some(title.into()),
+            items,
+            footer: None,
+        }
+    }
+
+    fn plain(items: Vec<Item>) -> Self {
+        Self {
+            title: None,
+            items,
+            footer: None,
+        }
+    }
+
+    fn footer(self, footer: &'static str) -> Self {
+        Self {
+            footer: Some(footer),
+            ..self
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Row {
+    item: Item,
+    top: i32,
+    stop: i32,
+    first: bool,
+    last: bool,
+}
+
+impl Row {
+    const fn bottom(&self) -> i32 {
+        self.top + self.item.height()
+    }
+}
+
+#[derive(Debug, Default)]
+struct Layout {
+    rows: Vec<Row>,
+    captions: Vec<(String, i32)>,
+    footers: Vec<(&'static str, i32)>,
+    groups: Vec<(i32, i32)>,
+    bottom: i32,
+}
+
+impl Layout {
+    fn new(sections: Vec<Section>) -> Self {
+        let mut layout = Self::default();
+        let mut y = HEADER_HEIGHT;
+        for section in sections
+            .into_iter()
+            .filter(|section| !section.items.is_empty())
+        {
+            let stop = y;
+            if let Some(title) = section.title {
+                layout.captions.push((title, y + CAPTION_HEIGHT / 2 + 2));
+                y += CAPTION_HEIGHT;
+            }
+            let top = y;
+            let count = section.items.len();
+            for (index, item) in section.items.into_iter().enumerate() {
+                layout.rows.push(Row {
+                    item,
+                    top: y,
+                    stop: if index == 0 { stop } else { y },
+                    first: index == 0,
+                    last: index + 1 == count,
+                });
+                y += item.height();
+            }
+            layout.groups.push((top, y));
+            if let Some(footer) = section.footer {
+                layout.footers.push((footer, y + FOOTER_HEIGHT / 2));
+                y += FOOTER_HEIGHT;
+            }
+            y += SECTION_GAP;
+        }
+        layout.bottom = y;
+        layout
+    }
+
+    fn maximum_scroll(&self) -> i32 {
+        (self.bottom - DISPLAY_HEIGHT as i32).max(0)
+    }
+
+    fn row_at(&self, y: i32) -> Option<usize> {
+        self.rows
+            .iter()
+            .position(|row| (row.top..row.bottom()).contains(&y))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Touch {
+    x: i32,
+    y: i32,
+    scroll: i32,
+    row: Option<usize>,
+    header: bool,
+    scrolling: bool,
+    sliding: bool,
+}
+
+enum Trailing {
+    None,
+    Switch(bool),
+    Value(String, [u8; 3]),
+    Link(String, [u8; 3]),
+}
+
+struct RowView {
+    label: String,
+    label_color: [u8; 3],
+    detail: Option<String>,
+    trailing: Trailing,
+}
+
+impl RowView {
+    fn new(label: impl Into<String>, trailing: Trailing) -> Self {
+        Self {
+            label: label.into(),
+            label_color: WHITE,
+            detail: None,
+            trailing,
+        }
+    }
+
+    fn detail(self, detail: impl Into<String>) -> Self {
+        Self {
+            detail: Some(detail.into()),
+            ..self
+        }
+    }
+
+    fn color(self, label_color: [u8; 3]) -> Self {
+        Self {
+            label_color,
+            ..self
+        }
+    }
+}
+
+struct SettingsUi<D> {
+    display: D,
     equalizer_control: prelude_media::EqualizerControl,
     equalizer_ui: EqualizerUi,
-    display: LinuxDisplayHandle,
     state_dir: PathBuf,
     settings: RuntimeSettings,
     staged_dpi: u32,
@@ -238,38 +429,32 @@ struct SettingsUi {
     staged_phone_audio: bool,
     staged_radio: Option<(u8, ChannelWidth)>,
     page: Page,
-    selected: usize,
-    dpi_editing: bool,
-    touch_target: Option<usize>,
-    dpi_dragging: bool,
+    focus: usize,
+    settings_focus: usize,
+    phone_focus: usize,
+    editing: bool,
+    touch: Option<Touch>,
+    scroll: i32,
     menu_open: bool,
     error_message: Option<&'static str>,
     ambient_light: Option<AmbientLightControl>,
     directory: Option<WirelessPhoneDirectory>,
+    wireless: bool,
     phones: Vec<KnownPhone>,
     active_phone: Option<String>,
-    phone_focus: usize,
     opened_phone: Option<String>,
-    phone_action: usize,
-    wifi_focus: usize,
-    wifi_editing: bool,
-    list_touch: Option<usize>,
-    title_touched: bool,
     confirming_forget: bool,
     pending_connect: Option<String>,
     phones_refreshed: Instant,
-    scroll: i32,
-    touch_start: Option<(i32, i32, i32)>,
-    touch_scrolling: bool,
     events: Sender<HostUiEvent>,
     wake: Arc<Notify>,
     fonts: FontSet,
 }
 
-impl SettingsUi {
+impl<D: OverlaySurface> SettingsUi<D> {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        display: LinuxDisplayHandle,
+        display: D,
         state_dir: PathBuf,
         settings: RuntimeSettings,
         equalizer_control: prelude_media::EqualizerControl,
@@ -283,9 +468,9 @@ impl SettingsUi {
             control.set_automatic_night_mode(settings.auto_night_mode);
         }
         Self {
+            display,
             equalizer_control,
             equalizer_ui: EqualizerUi::new(settings.equalizer),
-            display,
             state_dir,
             settings,
             staged_dpi: settings.reported_dpi,
@@ -293,29 +478,23 @@ impl SettingsUi {
             staged_phone_audio: settings.phone_audio,
             staged_radio: settings.wifi_radio(),
             page: Page::Settings,
-            selected: 0,
-            dpi_editing: false,
-            touch_target: None,
-            dpi_dragging: false,
+            focus: 0,
+            settings_focus: 0,
+            phone_focus: 0,
+            editing: false,
+            touch: None,
+            scroll: 0,
             menu_open: false,
             error_message: None,
             ambient_light,
+            wireless: directory.is_some(),
             directory,
             phones: Vec::new(),
             active_phone: None,
-            phone_focus: 0,
             opened_phone: None,
-            phone_action: CONNECT_ROW,
-            wifi_focus: WIFI_BAND_ROW,
-            wifi_editing: false,
-            list_touch: None,
-            title_touched: false,
             confirming_forget: false,
             pending_connect: None,
             phones_refreshed: Instant::now(),
-            scroll: 0,
-            touch_start: None,
-            touch_scrolling: false,
             events,
             wake,
             fonts: FontSet::load(),
@@ -334,24 +513,18 @@ impl SettingsUi {
             PlatformInputEventKind::KnobButton { button, pressed }
                 if self.menu_open && !pressed =>
             {
-                match self.page {
-                    Page::Equalizer => self.handle_equalizer_button(button),
-                    Page::Settings => self.handle_knob_release(button),
-                    Page::Phones | Page::Phone | Page::Advanced => {
-                        self.handle_list_knob_release(button);
-                    }
+                if self.page == Page::Equalizer {
+                    self.handle_equalizer_button(button);
+                } else {
+                    self.handle_button(button);
                 }
             }
             PlatformInputEventKind::Rotary { direction, steps } if self.menu_open => {
-                match self.page {
-                    Page::Equalizer => {
-                        self.equalizer_ui.rotary(direction, steps);
-                        self.apply_equalizer();
-                    }
-                    Page::Settings => self.handle_rotary(direction, steps),
-                    Page::Phones | Page::Phone | Page::Advanced => {
-                        self.handle_list_rotary(direction, steps);
-                    }
+                if self.page == Page::Equalizer {
+                    self.equalizer_ui.rotary(direction, steps);
+                    self.apply_equalizer();
+                } else {
+                    self.handle_rotary(direction, steps);
                 }
             }
             PlatformInputEventKind::Touch {
@@ -359,22 +532,19 @@ impl SettingsUi {
                 phase,
                 x,
                 y,
-            } if self.menu_open => match self.page {
-                Page::Equalizer => self.handle_equalizer_touch(phase, x, y),
-                Page::Settings => self.handle_touch(phase, x, y),
-                Page::Phones | Page::Phone | Page::Advanced => self.handle_list_touch(phase, x, y),
-            },
+            } if self.menu_open => {
+                if self.page == Page::Equalizer {
+                    self.handle_equalizer_touch(phase, x, y);
+                } else {
+                    self.handle_touch(phase, i32::from(x), i32::from(y));
+                }
+            }
             PlatformInputEventKind::Reset { .. } if self.menu_open => {
                 self.equalizer_ui.cancel_interaction();
                 self.save_equalizer();
-                self.touch_target = None;
-                self.dpi_dragging = false;
-                self.dpi_editing = false;
-                self.wifi_editing = false;
-                self.list_touch = None;
-                self.title_touched = false;
-                self.touch_start = None;
-                self.touch_scrolling = false;
+                self.touch = None;
+                self.editing = false;
+                self.redraw();
             }
             _ => {}
         }
@@ -403,10 +573,12 @@ impl SettingsUi {
             self.pending_connect = None;
         }
         self.phone_focus = self.phone_focus.min(self.phones.len().saturating_sub(1));
-        if self.page == Page::Phone && self.opened().is_none() {
-            self.show_phones(self.phone_focus);
+        match self.page {
+            Page::Phone if self.opened().is_none() => self.show_phones(self.phone_focus),
+            Page::Phones => self.focus = self.focus.min(self.phones.len().saturating_sub(1)),
+            _ => {}
         }
-        self.scroll = self.scroll.min(self.maximum_scroll());
+        self.scroll = self.scroll.min(self.layout().maximum_scroll());
     }
 
     fn opened(&self) -> Option<&KnownPhone> {
@@ -414,99 +586,84 @@ impl SettingsUi {
         self.phones.iter().find(|phone| phone.address == address)
     }
 
-    fn list_len(&self) -> usize {
-        match self.page {
-            Page::Equalizer => 0,
-            Page::Settings => SETTINGS_ROWS.len(),
-            Page::Phones => self.phones.len(),
-            Page::Phone => PHONE_ACTION_ROWS,
-            Page::Advanced if self.wifi_available() => WIFI_ROWS,
-            Page::Advanced => 0,
-        }
-    }
-
     fn wifi_available(&self) -> bool {
-        self.directory.is_some() && self.staged_radio.is_some()
+        self.wireless && self.staged_radio.is_some()
     }
 
-    fn list_focus(&self) -> usize {
+    fn has_staged_changes(&self) -> bool {
+        self.staged_dpi != self.settings.reported_dpi
+            || self.staged_dpi_customized != self.settings.dpi_customized
+            || self.staged_phone_audio != self.settings.phone_audio
+            || self.staged_radio != self.settings.wifi_radio()
+    }
+
+    fn sections(&self) -> Vec<Section> {
         match self.page {
-            Page::Equalizer => 0,
-            Page::Settings => self.selected,
-            Page::Phones => self.phone_focus,
-            Page::Phone => self.phone_action,
-            Page::Advanced => self.wifi_focus,
+            Page::Settings => vec![
+                Section::plain(vec![Item::Phones]),
+                Section::titled(
+                    "Display",
+                    vec![Item::AutoBrightness, Item::AutoNightMode, Item::Density],
+                ),
+                Section::titled("Audio", vec![Item::PhoneAudio, Item::Equalizer]),
+                Section::titled("Advanced", vec![Item::Wifi]),
+            ],
+            Page::Phones => vec![Section::plain(
+                (0..self.phones.len()).map(Item::Phone).collect(),
+            )],
+            Page::Phone => self
+                .opened()
+                .map(|phone| {
+                    vec![Section {
+                        title: self.phone_status(phone).map(str::to_owned),
+                        ..Section::plain(vec![Item::Connect, Item::Forget])
+                    }]
+                })
+                .unwrap_or_default(),
+            Page::Density => vec![
+                Section::plain(vec![Item::DensitySlider, Item::DensityReset])
+                    .footer("CarPlay and Android Auto restart after settings close"),
+            ],
+            Page::Wifi if self.wifi_available() => vec![
+                Section::plain(vec![Item::WifiBand, Item::WifiChannel, Item::WifiWidth])
+                    .footer("Wi-Fi restarts after settings close"),
+            ],
+            Page::Wifi | Page::Equalizer => Vec::new(),
         }
     }
 
-    fn row_stops(&self) -> Vec<i32> {
-        match self.page {
-            Page::Equalizer => Vec::new(),
-            Page::Settings => SETTINGS_ROWS
-                .iter()
-                .map(|&(top, _)| top - FIRST_ROW_Y)
-                .collect(),
-            Page::Phones | Page::Phone | Page::Advanced => (0..self.list_len())
-                .map(|index| list_row_y(index) - FIRST_ROW_Y)
-                .collect(),
-        }
+    fn layout(&self) -> Layout {
+        Layout::new(self.sections())
     }
 
-    fn maximum_scroll(&self) -> i32 {
-        let content_bottom = match self.page {
-            Page::Equalizer => DISPLAY_HEIGHT as i32,
-            Page::Settings => ADVANCED_ROW_Y + ADVANCED_ROW_HEIGHT + ROW_GAP,
-            Page::Phones | Page::Phone | Page::Advanced => list_row_y(self.list_len()),
+    fn focused_item(&self) -> Option<Item> {
+        self.layout().rows.get(self.focus).map(|row| row.item)
+    }
+
+    fn focus_row(&mut self, row: usize) {
+        if row != self.focus {
+            self.confirming_forget = false;
+            self.editing = false;
+        }
+        self.focus = row;
+    }
+
+    fn scroll_to_focus(&mut self) {
+        let layout = self.layout();
+        let Some(row) = layout.rows.get(self.focus) else {
+            self.scroll = 0;
+            return;
         };
-        stop_at_or_after(&self.row_stops(), content_bottom - DISPLAY_HEIGHT as i32)
-    }
-
-    fn scroll_into_view(&mut self, top: i32, height: i32) {
-        let hidden_below = top + height + ROW_GAP - DISPLAY_HEIGHT as i32;
-        let needed = stop_at_or_after(&self.row_stops(), hidden_below);
+        let hidden_below = row.bottom() + SECTION_GAP - DISPLAY_HEIGHT as i32;
         self.scroll = self
             .scroll
-            .max(needed)
-            .min(top - FIRST_ROW_Y)
-            .clamp(0, self.maximum_scroll());
+            .max(hidden_below)
+            .min(row.stop - HEADER_HEIGHT)
+            .clamp(0, layout.maximum_scroll());
     }
 
     fn content_y(&self, y: i32) -> Option<i32> {
         (y >= VIEWPORT_TOP).then_some(y + self.scroll)
-    }
-
-    fn begin_touch(&mut self, x: i32, y: i32) {
-        self.touch_start = Some((x, y, self.scroll));
-        self.touch_scrolling = false;
-    }
-
-    fn drag_scroll(&mut self, x: i32, y: i32) -> bool {
-        let Some((start_x, start_y, start_scroll)) = self.touch_start else {
-            return false;
-        };
-        let (dx, dy) = (x - start_x, y - start_y);
-        if !self.touch_scrolling
-            && dy.abs() >= DRAG_THRESHOLD
-            && dy.abs() >= dx.abs()
-            && self.maximum_scroll() > 0
-        {
-            self.touch_scrolling = true;
-        }
-        if self.touch_scrolling {
-            self.scroll = (start_scroll - dy).clamp(0, self.maximum_scroll());
-            self.redraw();
-        }
-        self.touch_scrolling
-    }
-
-    fn end_touch(&mut self) -> bool {
-        self.touch_start = None;
-        let scrolled = std::mem::take(&mut self.touch_scrolling);
-        if scrolled {
-            self.scroll = nearest_stop(&self.row_stops(), self.scroll).min(self.maximum_scroll());
-            self.redraw();
-        }
-        scrolled
     }
 
     fn open(&mut self) {
@@ -516,14 +673,15 @@ impl SettingsUi {
         }
         self.menu_open = true;
         self.page = Page::Settings;
-        self.selected = 0;
+        self.focus = 0;
+        self.settings_focus = 0;
         self.scroll = 0;
         self.staged_dpi = self.settings.reported_dpi;
         self.staged_dpi_customized = self.settings.dpi_customized;
         self.staged_phone_audio = self.settings.phone_audio;
         self.staged_radio = self.settings.wifi_radio();
-        self.dpi_editing = false;
-        self.wifi_editing = false;
+        self.editing = false;
+        self.touch = None;
         self.error_message = None;
         self.refresh_phones();
         self.wake.notify_one();
@@ -558,9 +716,6 @@ impl SettingsUi {
         self.settings = next;
         self.menu_open = false;
         self.leave_subpage();
-        self.touch_target = None;
-        self.dpi_dragging = false;
-        self.dpi_editing = false;
         if let Err(error) = self.display.clear_overlay() {
             warn!(%error, "could not clear the host settings UI");
         }
@@ -587,7 +742,6 @@ impl SettingsUi {
                 warn!(%error, "could not release the host settings UI during shutdown");
             }
             self.menu_open = false;
-            self.dpi_editing = false;
             self.leave_subpage();
             self.wake.notify_one();
         }
@@ -600,116 +754,194 @@ impl SettingsUi {
         self.wake.notify_one();
     }
 
-    fn handle_knob_release(&mut self, button: KnobInputButton) {
+    fn handle_button(&mut self, button: KnobInputButton) {
         match button {
-            KnobInputButton::Back => self.close(),
-            KnobInputButton::Select => match self.selected {
-                AUTO_BRIGHTNESS_ROW => self.toggle_auto_brightness(),
-                AUTO_NIGHT_MODE_ROW => self.toggle_auto_night_mode(),
-                PHONE_AUDIO_ROW => self.toggle_phone_audio(),
-                EQUALIZER_ROW => self.enter_equalizer_page(),
-                DPI_ROW => {
-                    self.dpi_editing = !self.dpi_editing;
+            KnobInputButton::Back if self.editing => {
+                self.editing = false;
+                self.redraw();
+            }
+            KnobInputButton::Back if self.page == Page::Settings => self.close(),
+            KnobInputButton::Back => self.go_back(),
+            KnobInputButton::Select => match self.focused_item() {
+                Some(item) if item.adjustable() => {
+                    self.editing = !self.editing;
                     self.redraw();
                 }
-                RESTORE_DPI_ROW => self.restore_original_dpi(),
-                PHONES_ROW => self.enter_phones_page(),
-                ADVANCED_ROW => self.enter_advanced_page(),
-                _ => unreachable!("settings selection is bounded"),
+                Some(item) => self.activate(item),
+                None => {}
             },
         }
     }
 
     fn handle_rotary(&mut self, direction: RotaryDirection, steps: u8) {
-        if self.selected == DPI_ROW && self.dpi_editing {
-            let delta = u32::from(steps).saturating_mul(DPI_STEP);
-            self.staged_dpi = match direction {
-                RotaryDirection::Clockwise => self.staged_dpi.saturating_add(delta),
-                RotaryDirection::CounterClockwise => self.staged_dpi.saturating_sub(delta),
+        if self.editing {
+            if let Some(item) = self.focused_item() {
+                let steps = isize::from(steps);
+                let delta = match direction {
+                    RotaryDirection::Clockwise => steps,
+                    RotaryDirection::CounterClockwise => -steps,
+                };
+                self.adjust(item, delta, false);
             }
-            .clamp(MIN_DPI, MAX_DPI);
-            self.staged_dpi_customized = true;
-        } else {
-            self.selected = selection_after_rotary(self.selected, direction, steps, ADVANCED_ROW);
-            self.dpi_editing = false;
-            let (top, height) = SETTINGS_ROWS[self.selected];
-            self.scroll_into_view(top, height);
+            return;
         }
+        let Some(last) = self.layout().rows.len().checked_sub(1) else {
+            return;
+        };
+        self.focus_row(selection_after_rotary(self.focus, direction, steps, last));
+        self.scroll_to_focus();
         self.redraw();
     }
 
-    fn handle_touch(&mut self, phase: TouchInputPhase, x: u16, y: u16) {
-        let x = i32::from(x);
-        let y = i32::from(y);
+    fn handle_touch(&mut self, phase: TouchInputPhase, x: i32, y: i32) {
         match phase {
             TouchInputPhase::Down => {
-                self.begin_touch(x, y);
-                self.touch_target = self.content_y(y).and_then(settings_row_at);
-                self.dpi_dragging = false;
-                if let Some(selection) = self.touch_target {
-                    self.selected = selection;
+                let row = self.content_y(y).and_then(|y| self.layout().row_at(y));
+                self.touch = Some(Touch {
+                    x,
+                    y,
+                    scroll: self.scroll,
+                    row,
+                    header: y < HEADER_HEIGHT,
+                    scrolling: false,
+                    sliding: false,
+                });
+                if let Some(row) = row {
+                    self.focus_row(row);
                 }
-                self.dpi_editing = false;
+                self.editing = false;
                 self.redraw();
             }
-            TouchInputPhase::Move if self.dpi_dragging => self.stage_dpi_from_x(x),
-            TouchInputPhase::Move => {
-                if self.drag_scroll(x, y) {
-                    self.touch_target = None;
-                } else if self.touch_target == Some(DPI_ROW)
-                    && self
-                        .touch_start
-                        .is_some_and(|(start_x, _, _)| (x - start_x).abs() >= DRAG_THRESHOLD)
-                {
-                    self.dpi_dragging = true;
-                    self.stage_dpi_from_x(x);
-                }
+            TouchInputPhase::Move => self.touch_moved(x, y),
+            TouchInputPhase::Up => self.touch_released(x, y),
+        }
+    }
+
+    fn touch_moved(&mut self, x: i32, y: i32) {
+        let Some(mut touch) = self.touch else {
+            return;
+        };
+        let (dx, dy) = (x - touch.x, y - touch.y);
+        let maximum = self.layout().maximum_scroll();
+        if !touch.scrolling && !touch.sliding {
+            let on_slider = touch.row.is_some() && self.focused_item() == Some(Item::DensitySlider);
+            if on_slider && dx.abs() >= DRAG_THRESHOLD && dx.abs() > dy.abs() {
+                touch.sliding = true;
+            } else if dy.abs() >= DRAG_THRESHOLD && dy.abs() >= dx.abs() && maximum > 0 {
+                touch.scrolling = true;
             }
-            TouchInputPhase::Up => {
-                let scrolled = self.end_touch();
-                let released_on_target = !scrolled
-                    && self.touch_target.is_some()
-                    && self.touch_target == self.content_y(y).and_then(settings_row_at);
-                match self.touch_target {
-                    Some(DPI_ROW) if self.dpi_dragging => self.redraw(),
-                    Some(DPI_ROW) if released_on_target => self.stage_dpi_from_x(x),
-                    Some(AUTO_BRIGHTNESS_ROW) if released_on_target => {
-                        self.toggle_auto_brightness();
-                    }
-                    Some(AUTO_NIGHT_MODE_ROW) if released_on_target => {
-                        self.toggle_auto_night_mode();
-                    }
-                    Some(PHONE_AUDIO_ROW) if released_on_target => self.toggle_phone_audio(),
-                    Some(EQUALIZER_ROW) if released_on_target => self.enter_equalizer_page(),
-                    Some(RESTORE_DPI_ROW) if released_on_target => self.restore_original_dpi(),
-                    Some(PHONES_ROW) if released_on_target => self.enter_phones_page(),
-                    Some(ADVANCED_ROW) if released_on_target => self.enter_advanced_page(),
-                    _ => {}
-                }
-                self.touch_target = None;
-                self.dpi_dragging = false;
+        }
+        self.touch = Some(touch);
+        if touch.sliding {
+            self.stage_dpi(dpi_from_x(x));
+        } else if touch.scrolling {
+            self.scroll = (touch.scroll - dy).clamp(0, maximum);
+            self.redraw();
+        }
+    }
+
+    fn touch_released(&mut self, x: i32, y: i32) {
+        let Some(touch) = self.touch.take() else {
+            return;
+        };
+        if touch.scrolling || touch.sliding {
+            self.redraw();
+            return;
+        }
+        if touch.header {
+            if y < HEADER_HEIGHT && self.page != Page::Settings {
+                self.go_back();
+            }
+            return;
+        }
+        let layout = self.layout();
+        let Some(row) = touch.row.and_then(|index| layout.rows.get(index)) else {
+            return;
+        };
+        let Some(content_y) = self.content_y(y).filter(|&y| layout.row_at(y) == touch.row) else {
+            return;
+        };
+        match row.item {
+            Item::DensitySlider if content_y >= row.top + SLIDER_TRACK_OFFSET - 28 => {
+                self.stage_dpi(dpi_from_x(x));
+            }
+            Item::DensitySlider => {}
+            item if item.adjustable() => self.adjust(item, 1, true),
+            item => self.activate(item),
+        }
+    }
+
+    fn activate(&mut self, item: Item) {
+        match item {
+            Item::Phones => {
+                self.refresh_phones();
+                self.enter(Page::Phones);
+            }
+            Item::Wifi => self.enter(Page::Wifi),
+            Item::AutoBrightness => self.toggle_auto_brightness(),
+            Item::AutoNightMode => self.toggle_auto_night_mode(),
+            Item::Density => self.enter(Page::Density),
+            Item::PhoneAudio => self.toggle_phone_audio(),
+            Item::Equalizer => self.enter(Page::Equalizer),
+            Item::Phone(index) => self.open_phone(index),
+            Item::Connect => self.connect_opened_phone(),
+            Item::Forget => self.forget_opened_phone(),
+            Item::DensityReset => self.restore_original_dpi(),
+            Item::DensitySlider | Item::WifiBand | Item::WifiChannel | Item::WifiWidth => {
+                self.adjust(item, 1, true);
             }
         }
     }
 
-    fn stage_dpi_from_x(&mut self, x: i32) {
-        self.staged_dpi = dpi_from_x(x);
+    fn adjust(&mut self, item: Item, delta: isize, wrap: bool) {
+        match item {
+            Item::DensitySlider => {
+                let dpi = i64::from(self.staged_dpi) + delta as i64 * i64::from(DPI_STEP);
+                let dpi = dpi.clamp(i64::from(MIN_DPI), i64::from(MAX_DPI));
+                self.stage_dpi(u32::try_from(dpi).unwrap_or(MIN_DPI));
+            }
+            Item::WifiBand | Item::WifiChannel | Item::WifiWidth => {
+                if let Some(radio) = self.staged_radio {
+                    self.staged_radio = Some(step_radio(radio, item, delta, wrap));
+                    self.error_message = None;
+                    self.redraw();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn stage_dpi(&mut self, dpi: u32) {
+        self.staged_dpi = dpi;
         self.staged_dpi_customized = true;
+        self.error_message = None;
         self.redraw();
     }
 
-    fn enter_phones_page(&mut self) {
-        self.refresh_phones();
-        self.show_phones(0);
+    fn enter(&mut self, page: Page) {
+        if self.page == Page::Settings {
+            self.settings_focus = self.focus;
+        }
+        self.equalizer_ui.cancel_interaction();
+        if page == Page::Equalizer {
+            self.equalizer_ui.focus_toggle();
+        }
+        self.page = page;
+        self.focus = 0;
+        self.scroll = 0;
+        self.editing = false;
+        self.confirming_forget = false;
+        self.redraw();
     }
 
     fn show_phones(&mut self, focus: usize) {
         self.page = Page::Phones;
         self.opened_phone = None;
         self.confirming_forget = false;
-        self.phone_focus = focus.min(self.phones.len().saturating_sub(1));
+        self.editing = false;
+        self.focus = focus.min(self.phones.len().saturating_sub(1));
         self.scroll = 0;
-        self.scroll_into_view(list_row_y(self.phone_focus), LIST_ROW_HEIGHT);
+        self.scroll_to_focus();
         self.redraw();
     }
 
@@ -719,18 +951,7 @@ impl SettingsUi {
         };
         self.opened_phone = Some(phone.address.clone());
         self.phone_focus = index;
-        self.page = Page::Phone;
-        self.phone_action = CONNECT_ROW;
-        self.confirming_forget = false;
-        self.scroll = 0;
-        self.redraw();
-    }
-
-    fn enter_equalizer_page(&mut self) {
-        self.equalizer_ui.cancel_interaction();
-        self.page = Page::Equalizer;
-        self.scroll = 0;
-        self.redraw();
+        self.enter(Page::Phone);
     }
 
     fn apply_equalizer(&mut self) {
@@ -776,142 +997,28 @@ impl SettingsUi {
         }
     }
 
-    fn enter_advanced_page(&mut self) {
-        self.page = Page::Advanced;
-        self.wifi_focus = WIFI_BAND_ROW;
-        self.wifi_editing = false;
-        self.scroll = 0;
-        self.redraw();
-    }
-
     fn leave_subpage(&mut self) {
         self.equalizer_ui.cancel_interaction();
-        self.page = Page::Settings;
+        if self.page != Page::Settings {
+            self.page = Page::Settings;
+            self.focus = self.settings_focus;
+            self.scroll = 0;
+        }
         self.opened_phone = None;
-        let (top, height) = SETTINGS_ROWS[self.selected];
-        self.scroll_into_view(top, height);
-        self.list_touch = None;
-        self.title_touched = false;
         self.confirming_forget = false;
-        self.wifi_editing = false;
+        self.editing = false;
+        self.touch = None;
+        self.scroll_to_focus();
     }
 
     fn go_back(&mut self) {
         match self.page {
+            Page::Settings => {}
             Page::Phone => self.show_phones(self.phone_focus),
             _ => {
                 self.leave_subpage();
                 self.redraw();
             }
-        }
-    }
-
-    fn handle_list_knob_release(&mut self, button: KnobInputButton) {
-        match button {
-            KnobInputButton::Back if self.wifi_editing => {
-                self.wifi_editing = false;
-                self.redraw();
-            }
-            KnobInputButton::Back => self.go_back(),
-            KnobInputButton::Select if self.page == Page::Advanced => {
-                self.wifi_editing = !self.wifi_editing && self.list_len() > 0;
-                self.redraw();
-            }
-            KnobInputButton::Select => self.choose_list_row(self.list_focus()),
-        }
-    }
-
-    fn handle_list_rotary(&mut self, direction: RotaryDirection, steps: u8) {
-        if self.wifi_editing {
-            let delta = match direction {
-                RotaryDirection::Clockwise => isize::from(steps),
-                RotaryDirection::CounterClockwise => -isize::from(steps),
-            };
-            self.step_staged_radio(delta, false);
-            return;
-        }
-        let Some(last) = self.list_len().checked_sub(1) else {
-            return;
-        };
-        let focus = selection_after_rotary(self.list_focus(), direction, steps, last);
-        self.focus_list_row(focus);
-        self.scroll_into_view(list_row_y(focus), LIST_ROW_HEIGHT);
-        self.redraw();
-    }
-
-    fn focus_list_row(&mut self, row: usize) {
-        match self.page {
-            Page::Equalizer => {}
-            Page::Settings => self.selected = row,
-            Page::Phones => self.phone_focus = row,
-            Page::Phone => {
-                if row != self.phone_action {
-                    self.confirming_forget = false;
-                }
-                self.phone_action = row;
-            }
-            Page::Advanced => {
-                if row != self.wifi_focus {
-                    self.wifi_editing = false;
-                }
-                self.wifi_focus = row;
-            }
-        }
-    }
-
-    fn handle_list_touch(&mut self, phase: TouchInputPhase, x: u16, y: u16) {
-        let x = i32::from(x);
-        let y = i32::from(y);
-        match phase {
-            TouchInputPhase::Down => {
-                self.begin_touch(x, y);
-                self.title_touched = y < VIEWPORT_TOP;
-                self.list_touch = self
-                    .content_y(y)
-                    .and_then(|y| list_row_at(y, self.list_len()));
-                if let Some(row) = self.list_touch {
-                    self.focus_list_row(row);
-                    self.redraw();
-                }
-            }
-            TouchInputPhase::Move => {
-                if self.drag_scroll(x, y) {
-                    self.list_touch = None;
-                }
-            }
-            TouchInputPhase::Up => {
-                let scrolled = self.end_touch();
-                let released_row = self
-                    .content_y(y)
-                    .and_then(|y| list_row_at(y, self.list_len()));
-                if self.title_touched && y < VIEWPORT_TOP {
-                    self.go_back();
-                } else if let Some(row) = self.list_touch.filter(|_| !scrolled)
-                    && released_row == Some(row)
-                {
-                    self.choose_list_row(row);
-                }
-                self.list_touch = None;
-                self.title_touched = false;
-            }
-        }
-    }
-
-    fn choose_list_row(&mut self, row: usize) {
-        match self.page {
-            Page::Settings | Page::Equalizer => {}
-            Page::Phones => self.open_phone(row),
-            Page::Phone if row == CONNECT_ROW => self.connect_opened_phone(),
-            Page::Phone => self.forget_opened_phone(),
-            Page::Advanced => self.step_staged_radio(1, true),
-        }
-    }
-
-    fn step_staged_radio(&mut self, delta: isize, wrap: bool) {
-        if let Some(radio) = self.staged_radio {
-            self.staged_radio = Some(step_radio(radio, self.wifi_focus, delta, wrap));
-            self.error_message = None;
-            self.redraw();
         }
     }
 
@@ -956,7 +1063,7 @@ impl SettingsUi {
     fn restore_original_dpi(&mut self) {
         self.staged_dpi = self.settings.original_dpi;
         self.staged_dpi_customized = false;
-        self.dpi_editing = false;
+        self.editing = false;
         self.error_message = None;
         self.redraw();
     }
@@ -998,443 +1105,6 @@ impl SettingsUi {
         self.redraw();
     }
 
-    fn redraw(&self) {
-        if self.menu_open
-            && let Err(error) = self.display.set_overlay(self.render())
-        {
-            warn!(%error, "could not update the host settings UI");
-        }
-    }
-
-    fn render(&self) -> Vec<u8> {
-        let mut canvas = Canvas::new();
-        canvas.scroll(self.scroll, VIEWPORT_TOP);
-        match self.page {
-            Page::Equalizer => self.equalizer_ui.render(
-                &mut canvas,
-                &self.fonts,
-                self.staged_phone_audio,
-                self.equalizer_control.availability(),
-                self.error_message,
-            ),
-            Page::Settings => self.render_settings_rows(&mut canvas),
-            Page::Phones => self.render_phones(&mut canvas),
-            Page::Phone => self.render_phone_actions(&mut canvas),
-            Page::Advanced => self.render_advanced(&mut canvas),
-        }
-        canvas.scroll(0, 0);
-        self.render_scrollbar(&mut canvas);
-        let title = match (self.page, self.opened()) {
-            (Page::Phone, Some(phone)) => self.fonts.fit(
-                &format!("‹ {}", phone.name),
-                TITLE_SIZE,
-                true,
-                CONTENT_RIGHT - CONTENT_X,
-            ),
-            (Page::Equalizer, _) => "‹ Equalizer".to_owned(),
-            (Page::Settings, _) => "Settings".to_owned(),
-            (Page::Advanced, _) => "‹ Advanced".to_owned(),
-            _ => "‹ Phones".to_owned(),
-        };
-        canvas.text(
-            &self.fonts,
-            &title,
-            CONTENT_X,
-            TITLE_Y,
-            TITLE_SIZE,
-            WHITE,
-            true,
-        );
-        if self.page == Page::Equalizer {
-            self.equalizer_ui.render_header(&mut canvas, &self.fonts);
-        } else if let Some(message) = self.error_message {
-            canvas.text_right(
-                &self.fonts,
-                message,
-                CONTENT_RIGHT,
-                TITLE_Y,
-                CAPTION_SIZE,
-                RED,
-                false,
-            );
-        }
-        canvas.to_nv12()
-    }
-
-    fn render_scrollbar(&self, canvas: &mut Canvas) {
-        let maximum = self.maximum_scroll();
-        if maximum == 0 {
-            return;
-        }
-        let track = DISPLAY_HEIGHT as i32 - VIEWPORT_TOP - ROW_GAP * 2;
-        let thumb = track * track / (track + maximum);
-        let thumb_y = VIEWPORT_TOP + ROW_GAP + (track - thumb) * self.scroll / maximum;
-        canvas.rounded_rect(ROW_X + ROW_WIDTH + 12, thumb_y, 4, thumb, 2, WHITE, 90);
-    }
-
-    fn render_settings_rows(&self, canvas: &mut Canvas) {
-        self.render_phones_row(canvas);
-        self.render_toggle_row(
-            canvas,
-            AUTO_BRIGHTNESS_ROW_Y,
-            "Auto brightness",
-            self.settings.auto_brightness,
-            AUTO_BRIGHTNESS_ROW,
-        );
-        self.render_toggle_row(
-            canvas,
-            AUTO_NIGHT_MODE_ROW_Y,
-            "Auto night mode",
-            self.settings.auto_night_mode,
-            AUTO_NIGHT_MODE_ROW,
-        );
-        self.render_toggle_row(
-            canvas,
-            PHONE_AUDIO_ROW_Y,
-            "Phone audio",
-            self.staged_phone_audio,
-            PHONE_AUDIO_ROW,
-        );
-        self.render_row(
-            canvas,
-            EQUALIZER_ROW_Y,
-            TOGGLE_ROW_HEIGHT,
-            "Equalizer",
-            EQUALIZER_ROW,
-        );
-        canvas.text_right(
-            &self.fonts,
-            if self.equalizer_ui.settings.enabled {
-                "On  ›"
-            } else {
-                "Off  ›"
-            },
-            CONTENT_RIGHT,
-            EQUALIZER_ROW_Y + ROW_TEXT_CENTER,
-            VALUE_SIZE,
-            SECONDARY,
-            false,
-        );
-        self.render_dpi_row(canvas);
-        self.render_reset_row(canvas);
-        self.render_row(
-            canvas,
-            ADVANCED_ROW_Y,
-            ADVANCED_ROW_HEIGHT,
-            "Advanced",
-            ADVANCED_ROW,
-        );
-        canvas.text_right(
-            &self.fonts,
-            "›",
-            CONTENT_RIGHT,
-            ADVANCED_ROW_Y + ROW_TEXT_CENTER,
-            VALUE_SIZE,
-            if self.selected == ADVANCED_ROW {
-                GREEN
-            } else {
-                SECONDARY
-            },
-            true,
-        );
-    }
-
-    fn render_row(&self, canvas: &mut Canvas, y: i32, height: i32, label: &str, index: usize) {
-        canvas.rounded_rect(
-            ROW_X,
-            y,
-            ROW_WIDTH,
-            height,
-            14,
-            WHITE,
-            if self.selected == index { 28 } else { 18 },
-        );
-        canvas.text(
-            &self.fonts,
-            label,
-            CONTENT_X,
-            y + ROW_TEXT_CENTER,
-            LABEL_SIZE,
-            WHITE,
-            true,
-        );
-    }
-
-    fn render_toggle_row(
-        &self,
-        canvas: &mut Canvas,
-        y: i32,
-        label: &str,
-        enabled: bool,
-        index: usize,
-    ) {
-        self.render_row(canvas, y, TOGGLE_ROW_HEIGHT, label, index);
-        canvas.text_right(
-            &self.fonts,
-            if enabled { "On" } else { "Off" },
-            SWITCH_X - CONTROL_GAP,
-            y + ROW_TEXT_CENTER,
-            VALUE_SIZE,
-            if enabled { GREEN } else { SECONDARY },
-            true,
-        );
-        canvas.rounded_rect(
-            SWITCH_X,
-            y + (TOGGLE_ROW_HEIGHT - SWITCH_HEIGHT) / 2,
-            SWITCH_WIDTH,
-            SWITCH_HEIGHT,
-            SWITCH_HEIGHT / 2,
-            WHITE,
-            if enabled { 82 } else { 28 },
-        );
-        let thumb_x = if enabled {
-            CONTENT_RIGHT - SWITCH_HEIGHT / 2
-        } else {
-            SWITCH_X + SWITCH_HEIGHT / 2
-        };
-        canvas.circle(thumb_x, y + ROW_TEXT_CENTER, 18, WHITE, 255);
-    }
-
-    fn render_dpi_row(&self, canvas: &mut Canvas) {
-        let y = DPI_ROW_Y;
-        self.render_row(canvas, y, DPI_ROW_HEIGHT, "Reported DPI", DPI_ROW);
-        canvas.text_right(
-            &self.fonts,
-            &self.staged_dpi.to_string(),
-            CONTENT_RIGHT,
-            y + ROW_TEXT_CENTER,
-            VALUE_SIZE,
-            if self.selected == DPI_ROW {
-                GREEN
-            } else {
-                SECONDARY
-            },
-            true,
-        );
-        let track_y = y + 76;
-        canvas.rounded_rect(SLIDER_X, track_y, SLIDER_WIDTH, 8, 4, WHITE, 45);
-        let filled_width = ((self.staged_dpi - MIN_DPI) as i64 * i64::from(SLIDER_WIDTH)
-            / i64::from(MAX_DPI - MIN_DPI)) as i32;
-        canvas.rounded_rect(SLIDER_X, track_y, filled_width.max(8), 8, 4, WHITE, 220);
-        canvas.circle(
-            SLIDER_X + filled_width,
-            track_y + 4,
-            12,
-            if self.selected == DPI_ROW {
-                GREEN
-            } else {
-                WHITE
-            },
-            255,
-        );
-        canvas.text(
-            &self.fonts,
-            &MIN_DPI.to_string(),
-            CONTENT_X,
-            y + 104,
-            CAPTION_SIZE,
-            SECONDARY,
-            false,
-        );
-        canvas.text_right(
-            &self.fonts,
-            &MAX_DPI.to_string(),
-            CONTENT_RIGHT,
-            y + 104,
-            CAPTION_SIZE,
-            SECONDARY,
-            false,
-        );
-    }
-
-    fn render_reset_row(&self, canvas: &mut Canvas) {
-        let y = RESTORE_DPI_ROW_Y;
-        self.render_row(
-            canvas,
-            y,
-            RESTORE_ROW_HEIGHT,
-            "Restore original DPI",
-            RESTORE_DPI_ROW,
-        );
-        canvas.text_right(
-            &self.fonts,
-            &self.settings.original_dpi.to_string(),
-            CONTENT_RIGHT,
-            y + ROW_TEXT_CENTER,
-            VALUE_SIZE,
-            if self.selected == RESTORE_DPI_ROW {
-                GREEN
-            } else {
-                SECONDARY
-            },
-            true,
-        );
-    }
-
-    fn render_phones_row(&self, canvas: &mut Canvas) {
-        let y = PHONES_ROW_Y;
-        self.render_row(canvas, y, PHONES_ROW_HEIGHT, "Phones", PHONES_ROW);
-        let summary = match self.phones.len() {
-            _ if self.directory.is_none() => "Off".to_owned(),
-            0 => "None ›".to_owned(),
-            count => format!("{count} saved ›"),
-        };
-        canvas.text_right(
-            &self.fonts,
-            &summary,
-            CONTENT_RIGHT,
-            y + ROW_TEXT_CENTER,
-            VALUE_SIZE,
-            if self.selected == PHONES_ROW {
-                GREEN
-            } else {
-                SECONDARY
-            },
-            true,
-        );
-    }
-
-    fn render_message(&self, canvas: &mut Canvas, headline: &str, caption: &str) {
-        canvas.text(
-            &self.fonts,
-            headline,
-            CONTENT_X,
-            FIRST_ROW_Y + ROW_TEXT_CENTER,
-            LABEL_SIZE,
-            WHITE,
-            true,
-        );
-        canvas.text(
-            &self.fonts,
-            caption,
-            CONTENT_X,
-            FIRST_ROW_Y + ROW_TEXT_CENTER + 40,
-            CAPTION_SIZE,
-            SECONDARY,
-            false,
-        );
-    }
-
-    fn render_advanced(&self, canvas: &mut Canvas) {
-        let Some((channel, width)) = self.staged_radio.filter(|_| self.wifi_available()) else {
-            self.render_message(
-                canvas,
-                "Wireless is off",
-                "Enable wireless projection to change Wi-Fi settings",
-            );
-            return;
-        };
-        for (row, label, value) in [
-            (
-                WIFI_BAND_ROW,
-                "Wi-Fi band",
-                band_name(Band::of_channel(channel)).to_owned(),
-            ),
-            (WIFI_CHANNEL_ROW, "Channel", channel.to_string()),
-            (
-                WIFI_WIDTH_ROW,
-                "Channel width",
-                format!("{} MHz", width.mhz()),
-            ),
-        ] {
-            let focused = self.wifi_focus == row;
-            let value = if focused && self.wifi_editing {
-                format!("‹ {value} ›")
-            } else {
-                value
-            };
-            self.render_list_row(
-                canvas,
-                row,
-                label,
-                WHITE,
-                &value,
-                if focused { GREEN } else { SECONDARY },
-            );
-        }
-        canvas.text(
-            &self.fonts,
-            "Wi-Fi restarts after settings close",
-            CONTENT_X,
-            list_row_y(WIFI_ROWS) + ROW_TEXT_CENTER / 2,
-            CAPTION_SIZE,
-            SECONDARY,
-            false,
-        );
-    }
-
-    fn render_phones(&self, canvas: &mut Canvas) {
-        if self.phones.is_empty() {
-            if self.directory.is_some() {
-                self.render_message(
-                    canvas,
-                    "No saved phones",
-                    "Phones you connect wirelessly show up here",
-                );
-            } else {
-                self.render_message(
-                    canvas,
-                    "Wireless is off",
-                    "Enable wireless projection to manage phones",
-                );
-            }
-            return;
-        }
-        for (index, phone) in self.phones.iter().enumerate() {
-            let selected = self.phone_focus == index;
-            let (value, color) = if self.is_active(phone) {
-                ("Connected ›", GREEN)
-            } else if self.is_pending(phone) {
-                ("Connecting ›", SECONDARY)
-            } else {
-                ("›", SECONDARY)
-            };
-            self.render_list_row(
-                canvas,
-                index,
-                &phone.name,
-                WHITE,
-                value,
-                if selected { GREEN } else { color },
-            );
-        }
-    }
-
-    fn render_phone_actions(&self, canvas: &mut Canvas) {
-        let Some(phone) = self.opened() else {
-            return;
-        };
-        let (status, color) = if self.is_active(phone) {
-            ("Connected", GREEN)
-        } else if self.is_pending(phone) {
-            ("Connecting", SECONDARY)
-        } else {
-            ("", SECONDARY)
-        };
-        self.render_list_row(
-            canvas,
-            CONNECT_ROW,
-            if self.is_active(phone) {
-                "Disconnect"
-            } else {
-                "Connect"
-            },
-            WHITE,
-            status,
-            if self.phone_action == CONNECT_ROW && color != GREEN {
-                GREEN
-            } else {
-                color
-            },
-        );
-        let (label, color) = if self.confirming_forget {
-            ("Press again to forget", RED)
-        } else {
-            ("Forget", WHITE)
-        };
-        self.render_list_row(canvas, FORGET_ROW, label, color, "", SECONDARY);
-    }
-
     fn is_active(&self, phone: &KnownPhone) -> bool {
         self.active_phone.as_deref() == Some(phone.address.as_str())
     }
@@ -1443,50 +1113,472 @@ impl SettingsUi {
         self.pending_connect.as_deref() == Some(phone.address.as_str())
     }
 
-    fn render_list_row(
-        &self,
-        canvas: &mut Canvas,
-        index: usize,
-        label: &str,
-        label_color: [u8; 3],
-        value: &str,
-        value_color: [u8; 3],
-    ) {
-        let y = list_row_y(index);
-        canvas.rounded_rect(
-            ROW_X,
-            y,
-            ROW_WIDTH,
-            LIST_ROW_HEIGHT,
-            14,
-            WHITE,
-            if self.list_focus() == index { 28 } else { 18 },
-        );
-        let value_width = self.fonts.text_width(value, VALUE_SIZE, true);
-        let label = self.fonts.fit(
-            label,
+    fn phone_status(&self, phone: &KnownPhone) -> Option<&'static str> {
+        if self.is_active(phone) {
+            Some("Connected")
+        } else if self.is_pending(phone) {
+            Some("Connecting…")
+        } else {
+            None
+        }
+    }
+
+    fn redraw(&self) {
+        if self.menu_open
+            && let Err(error) = self.display.set_overlay(self.render())
+        {
+            warn!(%error, "could not update the host settings UI");
+        }
+    }
+}
+
+impl<D: OverlaySurface> SettingsUi<D> {
+    fn render(&self) -> Vec<u8> {
+        let mut canvas = Canvas::new();
+        self.render_into(&mut canvas);
+        canvas.to_nv12()
+    }
+
+    fn render_into(&self, canvas: &mut Canvas) {
+        let layout = self.layout();
+        canvas.scroll(self.scroll, HEADER_HEIGHT);
+        match self.page {
+            Page::Equalizer => self.equalizer_ui.render(
+                canvas,
+                &self.fonts,
+                self.staged_phone_audio,
+                self.equalizer_control.availability(),
+                self.error_message,
+            ),
+            _ if layout.rows.is_empty() => self.render_empty(canvas),
+            _ => self.render_layout(canvas, &layout),
+        }
+        canvas.scroll(0, 0);
+        if self.scroll > 0 {
+            canvas.rounded_rect(
+                0,
+                HEADER_HEIGHT - 1,
+                DISPLAY_WIDTH as i32,
+                1,
+                0,
+                DIVIDER,
+                255,
+            );
+        }
+        self.render_scrollbar(canvas, &layout);
+        self.render_header(canvas);
+    }
+
+    fn title(&self) -> &str {
+        match self.page {
+            Page::Settings => "Settings",
+            Page::Phones => "Phones",
+            Page::Phone => self.opened().map_or("Phone", |phone| phone.name.as_str()),
+            Page::Density => "Screen density",
+            Page::Wifi => "Wi-Fi",
+            Page::Equalizer => "Equalizer",
+        }
+    }
+
+    fn render_header(&self, canvas: &mut Canvas) {
+        let note = match self.page {
+            Page::Equalizer => None,
+            _ if self.error_message.is_some() => self.error_message.map(|message| (message, RED)),
+            Page::Settings if self.has_staged_changes() => {
+                Some(("Applies when settings close", SECONDARY))
+            }
+            _ => None,
+        };
+        if self.page == Page::Settings {
+            canvas.text(
+                &self.fonts,
+                self.title(),
+                TITLE_X,
+                TITLE_Y,
+                TITLE_SIZE,
+                WHITE,
+                true,
+            );
+        } else {
+            let right = match note {
+                _ if self.page == Page::Equalizer => equalizer_ui::HEADER_LEFT,
+                Some((note, _)) => {
+                    CONTENT_RIGHT - self.fonts.text_width(note, CAPTION_SIZE, false) - CONTROL_GAP
+                }
+                None => CONTENT_RIGHT,
+            };
+            canvas.chevron(BACK_X, TITLE_Y, 12, false, WHITE, 4.0);
+            let title = self
+                .fonts
+                .fit(self.title(), TITLE_SIZE, true, right - BACK_TITLE_X);
+            canvas.text(
+                &self.fonts,
+                &title,
+                BACK_TITLE_X,
+                TITLE_Y,
+                TITLE_SIZE,
+                WHITE,
+                true,
+            );
+        }
+        if self.page == Page::Equalizer {
+            self.equalizer_ui.render_header(canvas, &self.fonts);
+        } else if let Some((note, color)) = note {
+            canvas.text_right(
+                &self.fonts,
+                note,
+                CONTENT_RIGHT,
+                TITLE_Y,
+                CAPTION_SIZE,
+                color,
+                false,
+            );
+        }
+    }
+
+    fn render_scrollbar(&self, canvas: &mut Canvas, layout: &Layout) {
+        let maximum = layout.maximum_scroll();
+        if maximum == 0 {
+            return;
+        }
+        let top = HEADER_HEIGHT + 8;
+        let track = DISPLAY_HEIGHT as i32 - 8 - top;
+        let visible = DISPLAY_HEIGHT as i32 - HEADER_HEIGHT;
+        let thumb = (track * visible / (visible + maximum)).max(32);
+        let y = top + (track - thumb) * self.scroll / maximum;
+        canvas.rounded_rect(DISPLAY_WIDTH as i32 - 10, y, 4, thumb, 2, WHITE, 90);
+    }
+
+    fn render_empty(&self, canvas: &mut Canvas) {
+        let (headline, caption) = match self.page {
+            Page::Phones if !self.wireless => (
+                "Wireless is off",
+                "Enable wireless projection to manage phones",
+            ),
+            Page::Phones => (
+                "No saved phones",
+                "Phones you connect wirelessly show up here",
+            ),
+            Page::Wifi => (
+                "Wireless is off",
+                "Enable wireless projection to change Wi-Fi settings",
+            ),
+            _ => return,
+        };
+        let center_x = DISPLAY_WIDTH as i32 / 2;
+        let center_y = (HEADER_HEIGHT + DISPLAY_HEIGHT as i32) / 2 - 12;
+        canvas.text_center(
+            &self.fonts,
+            headline,
+            center_x,
+            center_y - 18,
             LABEL_SIZE,
+            WHITE,
             true,
-            CONTENT_RIGHT - value_width - CONTROL_GAP - CONTENT_X,
         );
+        canvas.text_center(
+            &self.fonts,
+            caption,
+            center_x,
+            center_y + 20,
+            DETAIL_SIZE,
+            SECONDARY,
+            false,
+        );
+    }
+
+    fn render_layout(&self, canvas: &mut Canvas, layout: &Layout) {
+        for &(top, bottom) in &layout.groups {
+            canvas.rounded_rect(
+                GROUP_X,
+                top,
+                GROUP_WIDTH,
+                bottom - top,
+                GROUP_RADIUS,
+                GROUP,
+                255,
+            );
+        }
+        for (caption, y) in &layout.captions {
+            canvas.text(
+                &self.fonts,
+                caption,
+                CONTENT_X,
+                *y,
+                CAPTION_SIZE,
+                SECONDARY,
+                true,
+            );
+        }
+        for &(footer, y) in &layout.footers {
+            canvas.text(
+                &self.fonts,
+                footer,
+                CONTENT_X,
+                y,
+                CAPTION_SIZE,
+                SECONDARY,
+                false,
+            );
+        }
+        for (index, row) in layout.rows.iter().enumerate() {
+            let focused = index == self.focus;
+            if !row.first && !focused && index != self.focus + 1 {
+                canvas.rounded_rect(
+                    CONTENT_X,
+                    row.top,
+                    GROUP_X + GROUP_WIDTH - CONTENT_X,
+                    1,
+                    0,
+                    DIVIDER,
+                    255,
+                );
+            }
+            if focused {
+                self.render_focus(canvas, row);
+            }
+            if row.item == Item::DensitySlider {
+                self.render_density_slider(canvas, row, focused);
+            } else {
+                self.render_row(canvas, row);
+            }
+        }
+    }
+
+    fn render_focus(&self, canvas: &mut Canvas, row: &Row) {
+        let (x, y) = (GROUP_X + 4, row.top + 4);
+        let (width, height) = (GROUP_WIDTH - 8, row.item.height() - 8);
+        let radius = GROUP_RADIUS - 4;
+        canvas.rounded_rect(x, y, width, height, radius, FOCUS, 255);
+        let ring = if self.editing {
+            Some(GREEN)
+        } else if self.confirming_forget && row.item == Item::Forget {
+            Some(RED)
+        } else {
+            None
+        };
+        if let Some(color) = ring {
+            canvas.ring(x, y, width, height, radius, 2.0, color);
+        }
+    }
+
+    fn render_row(&self, canvas: &mut Canvas, row: &Row) {
+        let view = self.row_view(row.item);
+        let center = row.top + row.item.height() / 2;
+        let mut right = CONTENT_RIGHT;
+        match &view.trailing {
+            Trailing::None => {}
+            Trailing::Switch(on) => {
+                canvas.switch(CONTENT_RIGHT - SWITCH_WIDTH, center, *on);
+                right -= SWITCH_WIDTH + CONTROL_GAP;
+            }
+            Trailing::Value(value, color) | Trailing::Link(value, color) => {
+                if matches!(view.trailing, Trailing::Link(..)) {
+                    canvas.chevron(CONTENT_RIGHT - 2, center, 10, true, SECONDARY, 3.0);
+                    right -= 26;
+                }
+                if !value.is_empty() {
+                    let value = self.fonts.fit(value, VALUE_SIZE, false, 360);
+                    canvas.text_right(
+                        &self.fonts,
+                        &value,
+                        right,
+                        center,
+                        VALUE_SIZE,
+                        *color,
+                        false,
+                    );
+                    right -= self.fonts.text_width(&value, VALUE_SIZE, false) + CONTROL_GAP;
+                }
+            }
+        }
+        let label = self
+            .fonts
+            .fit(&view.label, LABEL_SIZE, false, right - CONTENT_X);
+        let label_y = if view.detail.is_some() {
+            center - 14
+        } else {
+            center
+        };
         canvas.text(
             &self.fonts,
             &label,
             CONTENT_X,
-            y + ROW_TEXT_CENTER,
+            label_y,
             LABEL_SIZE,
-            label_color,
-            true,
+            view.label_color,
+            false,
+        );
+        if let Some(detail) = &view.detail {
+            let detail = self
+                .fonts
+                .fit(detail, DETAIL_SIZE, false, right - CONTENT_X);
+            canvas.text(
+                &self.fonts,
+                &detail,
+                CONTENT_X,
+                center + 20,
+                DETAIL_SIZE,
+                SECONDARY,
+                false,
+            );
+        }
+    }
+
+    fn render_density_slider(&self, canvas: &mut Canvas, row: &Row, focused: bool) {
+        let active = focused && (self.editing || self.touch.is_some_and(|touch| touch.sliding));
+        let label_y = row.top + 42;
+        canvas.text(
+            &self.fonts,
+            "Density",
+            CONTENT_X,
+            label_y,
+            LABEL_SIZE,
+            WHITE,
+            false,
         );
         canvas.text_right(
             &self.fonts,
-            value,
+            &format!("{} dpi", self.staged_dpi),
             CONTENT_RIGHT,
-            y + ROW_TEXT_CENTER,
+            label_y,
             VALUE_SIZE,
-            value_color,
-            true,
+            if active { GREEN } else { SECONDARY },
+            false,
         );
+        let track_y = row.top + SLIDER_TRACK_OFFSET;
+        let x = dpi_x(self.staged_dpi);
+        canvas.rounded_rect(SLIDER_X, track_y - 4, SLIDER_WIDTH, 8, 4, TRACK, 255);
+        canvas.rounded_rect(
+            SLIDER_X,
+            track_y - 4,
+            (x - SLIDER_X).max(8),
+            8,
+            4,
+            if active { GREEN } else { WHITE },
+            255,
+        );
+        let default_x = dpi_x(self.settings.original_dpi);
+        canvas.rounded_rect(default_x - 1, track_y - 12, 2, 24, 1, SECONDARY, 255);
+        canvas.circle(x, track_y, 16, WHITE, 255);
+        let caption_y = row.top + 116;
+        canvas.text(
+            &self.fonts,
+            "Smaller",
+            CONTENT_X,
+            caption_y,
+            CAPTION_SIZE,
+            SECONDARY,
+            false,
+        );
+        canvas.text_right(
+            &self.fonts,
+            "Larger",
+            CONTENT_RIGHT,
+            caption_y,
+            CAPTION_SIZE,
+            SECONDARY,
+            false,
+        );
+    }
+
+    fn row_view(&self, item: Item) -> RowView {
+        let on_off = |on: bool| if on { "On" } else { "Off" }.to_owned();
+        match item {
+            Item::Phones => {
+                let active = self.phones.iter().find(|phone| self.is_active(phone));
+                let (summary, color) = match (active, self.phones.len()) {
+                    _ if !self.wireless => ("Off".to_owned(), SECONDARY),
+                    (Some(phone), _) => (phone.name.clone(), GREEN),
+                    (None, 0) => ("None".to_owned(), SECONDARY),
+                    (None, count) => (format!("{count} saved"), SECONDARY),
+                };
+                RowView::new("Phones", Trailing::Link(summary, color))
+            }
+            Item::Wifi => {
+                let summary = match self.staged_radio.filter(|_| self.wifi_available()) {
+                    Some((channel, _)) => {
+                        format!("{} · Ch {channel}", band_name(Band::of_channel(channel)))
+                    }
+                    None => "Off".to_owned(),
+                };
+                RowView::new("Wi-Fi", Trailing::Link(summary, SECONDARY))
+            }
+            Item::AutoBrightness => RowView::new(
+                "Auto brightness",
+                Trailing::Switch(self.settings.auto_brightness),
+            ),
+            Item::AutoNightMode => RowView::new(
+                "Auto night mode",
+                Trailing::Switch(self.settings.auto_night_mode),
+            ),
+            Item::Density => RowView::new(
+                "Screen density",
+                Trailing::Link(format!("{} dpi", self.staged_dpi), SECONDARY),
+            ),
+            Item::PhoneAudio => {
+                RowView::new("Phone audio", Trailing::Switch(self.staged_phone_audio))
+                    .detail("Keep sound on your phone")
+            }
+            Item::Equalizer => RowView::new(
+                "Equalizer",
+                Trailing::Link(on_off(self.equalizer_ui.settings.enabled), SECONDARY),
+            ),
+            Item::Phone(index) => {
+                let Some(phone) = self.phones.get(index) else {
+                    return RowView::new("", Trailing::None);
+                };
+                let (status, color) = if self.is_active(phone) {
+                    ("Connected", GREEN)
+                } else if self.is_pending(phone) {
+                    ("Connecting…", SECONDARY)
+                } else {
+                    ("", SECONDARY)
+                };
+                RowView::new(phone.name.clone(), Trailing::Link(status.to_owned(), color))
+            }
+            Item::Connect => {
+                let active = self.opened().is_some_and(|phone| self.is_active(phone));
+                RowView::new(
+                    if active { "Disconnect" } else { "Connect" },
+                    Trailing::None,
+                )
+            }
+            Item::Forget => RowView::new(
+                if self.confirming_forget {
+                    "Press again to forget"
+                } else {
+                    "Forget this phone"
+                },
+                Trailing::None,
+            )
+            .color(RED),
+            Item::DensityReset => {
+                let original = self.settings.original_dpi;
+                let at_default = self.staged_dpi == original && !self.staged_dpi_customized;
+                RowView::new(
+                    "Reset to default",
+                    Trailing::Value(format!("{original} dpi"), SECONDARY),
+                )
+                .color(if at_default { SECONDARY } else { WHITE })
+            }
+            Item::WifiBand | Item::WifiChannel | Item::WifiWidth => {
+                let (channel, width) = self.staged_radio.unwrap_or((0, ChannelWidth::Mhz20));
+                let (label, value) = match item {
+                    Item::WifiBand => ("Band", band_name(Band::of_channel(channel)).to_owned()),
+                    Item::WifiChannel => ("Channel", channel.to_string()),
+                    _ => ("Channel width", format!("{} MHz", width.mhz())),
+                };
+                let editing = self.editing && self.focused_item() == Some(item);
+                let trailing = if editing {
+                    Trailing::Value(format!("‹  {value}  ›"), GREEN)
+                } else {
+                    Trailing::Value(value, SECONDARY)
+                };
+                RowView::new(label, trailing)
+            }
+            Item::DensitySlider => RowView::new("Density", Trailing::None),
+        }
     }
 }
 
@@ -1513,69 +1605,24 @@ fn step_option<T: Copy + PartialEq>(options: &[T], current: T, delta: isize, wra
 
 fn step_radio(
     (channel, width): (u8, ChannelWidth),
-    row: usize,
+    item: Item,
     delta: isize,
     wrap: bool,
 ) -> (u8, ChannelWidth) {
     let band = Band::of_channel(channel);
-    let channel = match row {
-        WIFI_BAND_ROW => match step_option(&BANDS, band, delta, wrap) {
+    let channel = match item {
+        Item::WifiBand => match step_option(&BANDS, band, delta, wrap) {
             next if next == band => channel,
             next => next.default_channel(),
         },
-        WIFI_CHANNEL_ROW => step_option(band.channels(), channel, delta, wrap),
+        Item::WifiChannel => step_option(band.channels(), channel, delta, wrap),
         _ => channel,
     };
-    let width = match row {
-        WIFI_WIDTH_ROW => step_option(ChannelWidth::supported_on(channel), width, delta, wrap),
+    let width = match item {
+        Item::WifiWidth => step_option(ChannelWidth::supported_on(channel), width, delta, wrap),
         _ => width,
     };
     (channel, width.min(ChannelWidth::widest_for(channel)))
-}
-
-const SETTINGS_ROWS: [(i32, i32); 8] = [
-    (PHONES_ROW_Y, PHONES_ROW_HEIGHT),
-    (AUTO_BRIGHTNESS_ROW_Y, TOGGLE_ROW_HEIGHT),
-    (AUTO_NIGHT_MODE_ROW_Y, TOGGLE_ROW_HEIGHT),
-    (PHONE_AUDIO_ROW_Y, TOGGLE_ROW_HEIGHT),
-    (EQUALIZER_ROW_Y, TOGGLE_ROW_HEIGHT),
-    (DPI_ROW_Y, DPI_ROW_HEIGHT),
-    (RESTORE_DPI_ROW_Y, RESTORE_ROW_HEIGHT),
-    (ADVANCED_ROW_Y, ADVANCED_ROW_HEIGHT),
-];
-
-fn stop_at_or_after(stops: &[i32], offset: i32) -> i32 {
-    if offset <= 0 {
-        return 0;
-    }
-    stops
-        .iter()
-        .copied()
-        .find(|&stop| stop >= offset)
-        .or_else(|| stops.last().copied())
-        .unwrap_or(0)
-}
-
-fn nearest_stop(stops: &[i32], offset: i32) -> i32 {
-    stops
-        .iter()
-        .copied()
-        .min_by_key(|&stop| (stop - offset).abs())
-        .unwrap_or(0)
-}
-
-fn settings_row_at(y: i32) -> Option<usize> {
-    SETTINGS_ROWS
-        .iter()
-        .position(|&(top, height)| (top..top + height).contains(&y))
-}
-
-const fn list_row_y(index: usize) -> i32 {
-    FIRST_ROW_Y + index as i32 * (LIST_ROW_HEIGHT + ROW_GAP)
-}
-
-fn list_row_at(y: i32, rows: usize) -> Option<usize> {
-    (0..rows).find(|&index| (list_row_y(index)..list_row_y(index) + LIST_ROW_HEIGHT).contains(&y))
 }
 
 fn selection_after_rotary(
@@ -1597,6 +1644,11 @@ fn dpi_from_x(x: i32) -> u32 {
         + ((u32::try_from(position).unwrap_or(0) * (MAX_DPI - MIN_DPI))
             / u32::try_from(SLIDER_WIDTH).unwrap_or(1));
     ((raw + DPI_STEP / 2) / DPI_STEP * DPI_STEP).clamp(MIN_DPI, MAX_DPI)
+}
+
+fn dpi_x(dpi: u32) -> i32 {
+    let offset = dpi.clamp(MIN_DPI, MAX_DPI) - MIN_DPI;
+    SLIDER_X + (i64::from(offset) * i64::from(SLIDER_WIDTH) / i64::from(MAX_DPI - MIN_DPI)) as i32
 }
 
 struct FontSet {
@@ -1707,6 +1759,24 @@ impl Canvas {
         self.offset_y + self.clip_top..self.offset_y + DISPLAY_HEIGHT as i32
     }
 
+    fn fill(
+        &mut self,
+        (left, top, right, bottom): (i32, i32, i32, i32),
+        color: [u8; 3],
+        alpha: u8,
+        distance: impl Fn(f32, f32) -> f32,
+    ) {
+        let rows = self.visible_rows();
+        for py in top.max(rows.start)..bottom.min(rows.end) {
+            for px in left.max(0)..right.min(DISPLAY_WIDTH as i32) {
+                let coverage = (0.5 - distance(px as f32 + 0.5, py as f32 + 0.5)).clamp(0.0, 1.0);
+                if coverage > 0.0 {
+                    self.blend(px, py, color, (f32::from(alpha) * coverage).round() as u8);
+                }
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn rounded_rect(
         &mut self,
@@ -1718,40 +1788,96 @@ impl Canvas {
         color: [u8; 3],
         alpha: u8,
     ) {
-        let rows = self.visible_rows();
-        for py in y.max(rows.start)..(y + height).min(rows.end) {
-            for px in x.max(0)..(x + width).min(DISPLAY_WIDTH as i32) {
-                let corner_x = if px < x + radius {
-                    x + radius
-                } else if px >= x + width - radius {
-                    x + width - radius - 1
-                } else {
-                    px
-                };
-                let corner_y = if py < y + radius {
-                    y + radius
-                } else if py >= y + height - radius {
-                    y + height - radius - 1
-                } else {
-                    py
-                };
-                let inside = (px - corner_x).pow(2) + (py - corner_y).pow(2) <= radius.pow(2);
-                if inside {
-                    self.blend(px, py, color, alpha);
-                }
-            }
-        }
+        let distance = rounded_rect_distance(x, y, width, height, radius);
+        self.fill((x, y, x + width, y + height), color, alpha, distance);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ring(
+        &mut self,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        radius: i32,
+        thickness: f32,
+        color: [u8; 3],
+    ) {
+        let distance = rounded_rect_distance(x, y, width, height, radius);
+        let half = thickness / 2.0;
+        self.fill((x, y, x + width, y + height), color, 255, |px, py| {
+            (distance(px, py) + half).abs() - half
+        });
     }
 
     fn circle(&mut self, center_x: i32, center_y: i32, radius: i32, color: [u8; 3], alpha: u8) {
-        let rows = self.visible_rows();
-        for y in (center_y - radius).max(rows.start)..(center_y + radius).min(rows.end) {
-            for x in (center_x - radius).max(0)..(center_x + radius).min(DISPLAY_WIDTH as i32) {
-                if (x - center_x).pow(2) + (y - center_y).pow(2) <= radius.pow(2) {
-                    self.blend(x, y, color, alpha);
-                }
-            }
-        }
+        let (cx, cy, r) = (center_x as f32, center_y as f32, radius as f32);
+        self.fill(
+            (
+                center_x - radius - 1,
+                center_y - radius - 1,
+                center_x + radius + 1,
+                center_y + radius + 1,
+            ),
+            color,
+            alpha,
+            |px, py| (px - cx).hypot(py - cy) - r,
+        );
+    }
+
+    fn line(&mut self, from: (f32, f32), to: (f32, f32), width: f32, color: [u8; 3]) {
+        let half = width / 2.0;
+        let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+        let length = (dx * dx + dy * dy).max(f32::EPSILON);
+        let bounds = (
+            (from.0.min(to.0) - half).floor() as i32 - 1,
+            (from.1.min(to.1) - half).floor() as i32 - 1,
+            (from.0.max(to.0) + half).ceil() as i32 + 1,
+            (from.1.max(to.1) + half).ceil() as i32 + 1,
+        );
+        self.fill(bounds, color, 255, |px, py| {
+            let t = (((px - from.0) * dx + (py - from.1) * dy) / length).clamp(0.0, 1.0);
+            (px - from.0 - t * dx).hypot(py - from.1 - t * dy) - half
+        });
+    }
+
+    fn chevron(
+        &mut self,
+        tip_x: i32,
+        center_y: i32,
+        half_height: i32,
+        right: bool,
+        color: [u8; 3],
+        width: f32,
+    ) {
+        let (tip_x, center_y, half) = (tip_x as f32, center_y as f32, half_height as f32);
+        let arm_x = if right {
+            tip_x - half * 0.75
+        } else {
+            tip_x + half * 0.75
+        };
+        let tip = (tip_x, center_y);
+        self.line((arm_x, center_y - half), tip, width, color);
+        self.line(tip, (arm_x, center_y + half), width, color);
+    }
+
+    fn switch(&mut self, x: i32, center_y: i32, on: bool) {
+        let top = center_y - SWITCH_HEIGHT / 2;
+        self.rounded_rect(
+            x,
+            top,
+            SWITCH_WIDTH,
+            SWITCH_HEIGHT,
+            SWITCH_HEIGHT / 2,
+            if on { GREEN } else { TRACK },
+            255,
+        );
+        let thumb_x = if on {
+            x + SWITCH_WIDTH - SWITCH_HEIGHT / 2
+        } else {
+            x + SWITCH_HEIGHT / 2
+        };
+        self.circle(thumb_x, center_y, SWITCH_HEIGHT / 2 - 4, WHITE, 255);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1788,6 +1914,28 @@ impl Canvas {
         self.text(fonts, text, right - width, center_y, size, color, semibold);
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn text_center(
+        &mut self,
+        fonts: &FontSet,
+        text: &str,
+        center_x: i32,
+        center_y: i32,
+        size: f32,
+        color: [u8; 3],
+        semibold: bool,
+    ) {
+        let width = fonts.text_width(text, size, semibold);
+        self.text(
+            fonts,
+            text,
+            center_x - width / 2,
+            center_y,
+            size,
+            color,
+            semibold,
+        );
+    }
     fn font_text(
         &mut self,
         font: &Font,
@@ -1912,6 +2060,24 @@ fn rgb_to_yuv(red: u8, green: u8, blue: u8) -> (u8, u8, u8) {
     )
 }
 
+fn rounded_rect_distance(
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    radius: i32,
+) -> impl Fn(f32, f32) -> f32 {
+    let (half_width, half_height) = (width as f32 / 2.0, height as f32 / 2.0);
+    let radius = (radius as f32).min(half_width).min(half_height);
+    let (center_x, center_y) = (x as f32 + half_width, y as f32 + half_height);
+    let (inner_x, inner_y) = (half_width - radius, half_height - radius);
+    move |px, py| {
+        let qx = (px - center_x).abs() - inner_x;
+        let qy = (py - center_y).abs() - inner_y;
+        qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - radius
+    }
+}
+
 fn bitmap_glyph(character: char) -> Option<[u8; 7]> {
     let character = character.to_ascii_uppercase();
     Some(match character {
@@ -1969,84 +2135,346 @@ fn bitmap_glyph(character: char) -> Option<[u8; 7]> {
 
 #[cfg(test)]
 mod tests {
+    use platform_superbird::MonotonicMicros;
+    use prelude_wireless::bluez::PhoneKind;
+
     use super::*;
+
+    struct NullSurface;
+
+    impl OverlaySurface for NullSurface {
+        fn set_overlay(&self, _frame: Vec<u8>) -> prelude_media::Result<()> {
+            Ok(())
+        }
+
+        fn clear_overlay(&self) -> prelude_media::Result<()> {
+            Ok(())
+        }
+
+        fn set_host_ui_active(&self, _active: bool) -> prelude_media::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct Harness {
+        ui: SettingsUi<NullSurface>,
+        events: Receiver<HostUiEvent>,
+        _state: tempfile::TempDir,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let state = tempfile::TempDir::new().expect("state directory");
+            let (sender, events) = mpsc::channel();
+            let settings = RuntimeSettings {
+                wifi_channel: Some(36),
+                wifi_channel_width_mhz: Some(20),
+                ..RuntimeSettings::default()
+            };
+            let mut ui = SettingsUi::new(
+                NullSurface,
+                state.path().to_path_buf(),
+                settings,
+                prelude_media::EqualizerControl::default(),
+                None,
+                None,
+                sender,
+                Arc::new(Notify::new()),
+            );
+            ui.open();
+            Self {
+                ui,
+                events,
+                _state: state,
+            }
+        }
+
+        fn with_phones(mut self) -> Self {
+            self.ui.wireless = true;
+            self.ui.phones = vec![
+                KnownPhone {
+                    kind: PhoneKind::CarPlay,
+                    address: "aa".to_owned(),
+                    name: "Neel's iPhone".to_owned(),
+                },
+                KnownPhone {
+                    kind: PhoneKind::AndroidAuto,
+                    address: "bb".to_owned(),
+                    name: "Pixel 9 Pro".to_owned(),
+                },
+            ];
+            self.ui.active_phone = Some("aa".to_owned());
+            self
+        }
+
+        fn send(&mut self, kind: PlatformInputEventKind) {
+            self.ui.handle(PlatformInputEvent {
+                timestamp: MonotonicMicros(0),
+                kind,
+            });
+        }
+
+        fn press(&mut self, button: KnobInputButton) {
+            self.send(PlatformInputEventKind::KnobButton {
+                button,
+                pressed: false,
+            });
+        }
+
+        fn turn(&mut self, steps: i8) {
+            self.send(PlatformInputEventKind::Rotary {
+                direction: if steps >= 0 {
+                    RotaryDirection::Clockwise
+                } else {
+                    RotaryDirection::CounterClockwise
+                },
+                steps: steps.unsigned_abs(),
+            });
+        }
+
+        fn touch(&mut self, phase: TouchInputPhase, x: i32, y: i32) {
+            self.send(PlatformInputEventKind::Touch {
+                contact_id: 0,
+                phase,
+                x: x as u16,
+                y: y as u16,
+            });
+        }
+
+        fn tap(&mut self, x: i32, y: i32) {
+            self.touch(TouchInputPhase::Down, x, y);
+            self.touch(TouchInputPhase::Up, x, y);
+        }
+
+        fn focus(&mut self, item: Item) {
+            let index = self
+                .ui
+                .layout()
+                .rows
+                .iter()
+                .position(|row| row.item == item)
+                .expect("item is on the page");
+            let delta = index as i8 - self.ui.focus as i8;
+            self.turn(delta);
+            assert_eq!(self.ui.focused_item(), Some(item));
+        }
+
+        fn screen_y(&self, item: Item) -> i32 {
+            let row = self
+                .ui
+                .layout()
+                .rows
+                .into_iter()
+                .find(|row| row.item == item)
+                .expect("item is on the page");
+            row.top + row.item.height() / 2 - self.ui.scroll
+        }
+    }
 
     #[test]
     fn dpi_slider_clamps_and_snaps_to_ten() {
         assert_eq!(dpi_from_x(0), MIN_DPI);
         assert_eq!(dpi_from_x(SLIDER_X + SLIDER_WIDTH), MAX_DPI);
         assert_eq!(dpi_from_x(SLIDER_X + SLIDER_WIDTH / 2), 290);
-    }
-
-    #[test]
-    fn settings_rows_have_consistent_spacing_and_fit_on_screen() {
-        for (index, pair) in SETTINGS_ROWS.windows(2).enumerate() {
-            let [(top, height), (next, _)] = pair else {
-                unreachable!("windows(2) yields pairs");
-            };
-            assert_eq!(next - (top + height), ROW_GAP, "gap after row {index}");
+        for dpi in (MIN_DPI..=MAX_DPI).step_by(DPI_STEP as usize) {
+            assert_eq!(dpi_from_x(dpi_x(dpi)), dpi);
         }
-        assert_eq!(SETTINGS_ROWS[PHONES_ROW].0, FIRST_ROW_Y);
-        assert_eq!(RESTORE_ROW_HEIGHT, TOGGLE_ROW_HEIGHT);
-        assert_eq!(SLIDER_X + SLIDER_WIDTH, ROW_X + ROW_WIDTH - ROW_INSET);
-        assert_eq!(PHONES_ROW_HEIGHT, TOGGLE_ROW_HEIGHT);
-        assert_eq!(LIST_ROW_HEIGHT, TOGGLE_ROW_HEIGHT);
+    }
+
+    #[test]
+    fn settings_sections_stack_without_overlap_and_scroll_to_the_last_row() {
+        let harness = Harness::new();
+        let layout = harness.ui.layout();
+        assert_eq!(layout.groups.len(), 4);
+        assert_eq!(layout.captions.len(), 3);
+        for pair in layout.rows.windows(2) {
+            assert!(pair[0].bottom() <= pair[1].top, "{pair:?}");
+        }
+        let last = layout.rows.last().expect("rows");
+        assert_eq!(last.item, Item::Wifi);
         assert_eq!(
-            list_row_y(1) - list_row_y(0),
-            AUTO_BRIGHTNESS_ROW_Y - PHONES_ROW_Y
+            last.bottom() + SECTION_GAP - layout.maximum_scroll(),
+            DISPLAY_HEIGHT as i32
         );
     }
 
     #[test]
-    fn touch_rows_map_to_their_settings() {
-        assert_eq!(settings_row_at(FIRST_ROW_Y), Some(PHONES_ROW));
+    fn rotary_walks_every_row_and_keeps_the_focus_on_screen() {
+        let mut harness = Harness::new();
+        let rows = harness.ui.layout().rows;
+        for (index, row) in rows.iter().enumerate() {
+            assert_eq!(harness.ui.focus, index);
+            let top = row.top - harness.ui.scroll;
+            assert!(
+                top >= HEADER_HEIGHT,
+                "{:?} hidden under the header",
+                row.item
+            );
+            assert!(
+                row.bottom() - harness.ui.scroll <= DISPLAY_HEIGHT as i32,
+                "{:?} hidden below the screen",
+                row.item
+            );
+            harness.turn(1);
+        }
         assert_eq!(
-            settings_row_at(AUTO_BRIGHTNESS_ROW_Y),
-            Some(AUTO_BRIGHTNESS_ROW)
+            harness.ui.focus,
+            rows.len() - 1,
+            "rotation stops at the end"
         );
-        assert_eq!(settings_row_at(PHONE_AUDIO_ROW_Y), Some(PHONE_AUDIO_ROW));
-        assert_eq!(
-            settings_row_at(DPI_ROW_Y + DPI_ROW_HEIGHT - 1),
-            Some(DPI_ROW)
-        );
-        assert_eq!(settings_row_at(FIRST_ROW_Y + TOGGLE_ROW_HEIGHT), None);
-        assert_eq!(settings_row_at(VIEWPORT_TOP - 1), None);
+        harness.turn(-100);
+        assert_eq!((harness.ui.focus, harness.ui.scroll), (0, 0));
     }
 
     #[test]
-    fn rotary_navigation_runs_from_phones_to_advanced_and_stops() {
-        assert_eq!(SETTINGS_ROWS.len() - 1, ADVANCED_ROW);
+    fn tapping_rows_toggles_and_navigates() {
+        let mut harness = Harness::new();
+        let y = harness.screen_y(Item::AutoBrightness);
+        harness.tap(400, y);
+        assert!(!harness.ui.settings.auto_brightness);
+        harness.tap(400, harness.screen_y(Item::Density));
+        assert_eq!(harness.ui.page, Page::Density);
+        harness.tap(BACK_X, TITLE_Y);
+        assert_eq!(harness.ui.page, Page::Settings);
+        assert_eq!(harness.ui.focused_item(), Some(Item::Density));
+    }
+
+    #[test]
+    fn dragging_scrolls_without_activating_the_touched_row() {
+        let mut harness = Harness::new();
+        let y = harness.screen_y(Item::AutoNightMode);
+        harness.touch(TouchInputPhase::Down, 400, y);
+        harness.touch(TouchInputPhase::Move, 400, y - 80);
+        harness.touch(TouchInputPhase::Up, 400, y - 80);
+        assert_eq!(harness.ui.scroll, 80);
+        assert!(harness.ui.settings.auto_night_mode);
+    }
+
+    #[test]
+    fn density_is_staged_with_the_knob_and_reset_restores_the_original() {
+        let mut harness = Harness::new();
+        harness.focus(Item::Density);
+        harness.press(KnobInputButton::Select);
+        assert_eq!(harness.ui.page, Page::Density);
+        harness.press(KnobInputButton::Select);
+        assert!(harness.ui.editing);
+        harness.turn(3);
+        assert_eq!(harness.ui.staged_dpi, harness.ui.settings.reported_dpi + 30);
+        assert!(harness.ui.has_staged_changes());
+        harness.press(KnobInputButton::Back);
+        assert!(!harness.ui.editing);
+        harness.turn(1);
+        harness.press(KnobInputButton::Select);
+        assert_eq!(harness.ui.staged_dpi, harness.ui.settings.original_dpi);
+        assert!(!harness.ui.has_staged_changes());
+        harness.press(KnobInputButton::Back);
+        assert_eq!(harness.ui.page, Page::Settings);
+        assert_eq!(harness.ui.focused_item(), Some(Item::Density));
+    }
+
+    #[test]
+    fn density_slider_follows_a_horizontal_drag_but_ignores_label_taps() {
+        let mut harness = Harness::new();
+        harness.ui.enter(Page::Density);
+        let original = harness.ui.staged_dpi;
+        let label_y = HEADER_HEIGHT + 42;
+        harness.tap(SLIDER_X + SLIDER_WIDTH, label_y);
+        assert_eq!(harness.ui.staged_dpi, original);
+        harness.touch(TouchInputPhase::Down, dpi_x(original), label_y);
+        harness.touch(TouchInputPhase::Move, SLIDER_X + SLIDER_WIDTH + 40, label_y);
+        harness.touch(TouchInputPhase::Up, SLIDER_X + SLIDER_WIDTH + 40, label_y);
+        assert_eq!(harness.ui.staged_dpi, MAX_DPI);
+        harness.tap(SLIDER_X, HEADER_HEIGHT + SLIDER_TRACK_OFFSET);
+        assert_eq!(harness.ui.staged_dpi, MIN_DPI);
+    }
+
+    #[test]
+    fn closing_commits_staged_changes_once() {
+        let mut harness = Harness::new();
+        harness.focus(Item::PhoneAudio);
+        harness.press(KnobInputButton::Select);
+        assert!(harness.ui.staged_phone_audio);
+        harness.press(KnobInputButton::Back);
+        assert!(!harness.ui.menu_open);
+        let events: Vec<_> = harness.events.try_iter().collect();
+        assert!(matches!(
+            events.as_slice(),
+            [HostUiEvent::SettingsCommitted(SettingsCommitted {
+                restart_required: true,
+                radio_changed: false,
+                ..
+            })]
+        ));
+        assert!(harness.ui.settings.phone_audio);
+    }
+
+    #[test]
+    fn wifi_values_are_edited_in_place_and_back_leaves_edit_mode_first() {
+        let mut harness = Harness::new();
+        harness.ui.wireless = true;
+        harness.ui.enter(Page::Wifi);
+        harness.press(KnobInputButton::Select);
+        harness.turn(-1);
+        assert_eq!(harness.ui.staged_radio, Some((6, ChannelWidth::Mhz20)));
+        harness.press(KnobInputButton::Back);
+        assert_eq!(harness.ui.page, Page::Wifi);
+        harness.turn(1);
+        harness.press(KnobInputButton::Select);
+        harness.turn(2);
+        assert_eq!(harness.ui.staged_radio, Some((8, ChannelWidth::Mhz20)));
+        harness.turn(1);
+        assert_eq!(harness.ui.staged_radio, Some((9, ChannelWidth::Mhz20)));
         assert_eq!(
-            selection_after_rotary(PHONES_ROW, RotaryDirection::Clockwise, 1, ADVANCED_ROW),
-            AUTO_BRIGHTNESS_ROW
+            harness.ui.focus, 1,
+            "rotation edits instead of moving focus"
         );
+    }
+
+    #[test]
+    fn forgetting_a_phone_needs_a_second_press() {
+        let mut harness = Harness::new().with_phones();
+        harness.ui.enter(Page::Phones);
+        harness.turn(1);
+        harness.press(KnobInputButton::Select);
+        assert_eq!(harness.ui.page, Page::Phone);
+        assert_eq!(harness.ui.title(), "Pixel 9 Pro");
+        harness.turn(1);
+        harness.press(KnobInputButton::Select);
+        assert!(harness.ui.confirming_forget);
+        assert!(harness.events.try_iter().next().is_none());
+        harness.press(KnobInputButton::Select);
         assert_eq!(
-            selection_after_rotary(DPI_ROW, RotaryDirection::Clockwise, 5, ADVANCED_ROW),
-            ADVANCED_ROW
+            harness.events.try_iter().collect::<Vec<_>>(),
+            [HostUiEvent::ForgetPhone("bb".to_owned())]
         );
+        assert_eq!(harness.ui.page, Page::Phones);
+        assert_eq!(harness.ui.phones.len(), 1);
+    }
+
+    #[test]
+    fn connected_phone_offers_disconnect() {
+        let mut harness = Harness::new().with_phones();
+        harness.ui.enter(Page::Phones);
+        harness.press(KnobInputButton::Select);
+        harness.press(KnobInputButton::Select);
         assert_eq!(
-            selection_after_rotary(
-                AUTO_BRIGHTNESS_ROW,
-                RotaryDirection::CounterClockwise,
-                3,
-                ADVANCED_ROW
-            ),
-            PHONES_ROW
+            harness.events.try_iter().collect::<Vec<_>>(),
+            [HostUiEvent::DisconnectPhone("aa".to_owned())]
         );
     }
 
     #[test]
     fn wifi_band_switch_resets_the_channel_and_caps_the_width() {
         assert_eq!(
-            step_radio((36, ChannelWidth::Mhz20), WIFI_BAND_ROW, 1, true),
+            step_radio((36, ChannelWidth::Mhz20), Item::WifiBand, 1, true),
             (6, ChannelWidth::Mhz20)
         );
         assert_eq!(
-            step_radio((36, ChannelWidth::Mhz80), WIFI_BAND_ROW, -1, false),
+            step_radio((36, ChannelWidth::Mhz80), Item::WifiBand, -1, false),
             (6, ChannelWidth::Mhz40)
         );
         assert_eq!(
-            step_radio((36, ChannelWidth::Mhz20), WIFI_BAND_ROW, 1, false),
+            step_radio((36, ChannelWidth::Mhz20), Item::WifiBand, 1, false),
             (36, ChannelWidth::Mhz20)
         );
     }
@@ -2054,23 +2482,23 @@ mod tests {
     #[test]
     fn wifi_channels_stay_in_band() {
         assert_eq!(
-            step_radio((161, ChannelWidth::Mhz80), WIFI_CHANNEL_ROW, 1, false),
+            step_radio((161, ChannelWidth::Mhz80), Item::WifiChannel, 1, false),
             (165, ChannelWidth::Mhz20)
         );
         assert_eq!(
-            step_radio((165, ChannelWidth::Mhz20), WIFI_CHANNEL_ROW, 1, false),
+            step_radio((165, ChannelWidth::Mhz20), Item::WifiChannel, 1, false),
             (165, ChannelWidth::Mhz20)
         );
         assert_eq!(
-            step_radio((165, ChannelWidth::Mhz20), WIFI_CHANNEL_ROW, 1, true),
+            step_radio((165, ChannelWidth::Mhz20), Item::WifiChannel, 1, true),
             (36, ChannelWidth::Mhz20)
         );
         assert_eq!(
-            step_radio((48, ChannelWidth::Mhz20), WIFI_CHANNEL_ROW, 1, false),
+            step_radio((48, ChannelWidth::Mhz20), Item::WifiChannel, 1, false),
             (149, ChannelWidth::Mhz20)
         );
         assert_eq!(
-            step_radio((1, ChannelWidth::Mhz20), WIFI_CHANNEL_ROW, 20, false),
+            step_radio((1, ChannelWidth::Mhz20), Item::WifiChannel, 20, false),
             (13, ChannelWidth::Mhz20)
         );
     }
@@ -2078,31 +2506,16 @@ mod tests {
     #[test]
     fn wifi_width_only_offers_what_the_channel_supports() {
         assert_eq!(
-            step_radio((36, ChannelWidth::Mhz20), WIFI_WIDTH_ROW, 2, false),
+            step_radio((36, ChannelWidth::Mhz20), Item::WifiWidth, 2, false),
             (36, ChannelWidth::Mhz80)
         );
         assert_eq!(
-            step_radio((6, ChannelWidth::Mhz40), WIFI_WIDTH_ROW, 1, true),
+            step_radio((6, ChannelWidth::Mhz40), Item::WifiWidth, 1, true),
             (6, ChannelWidth::Mhz20)
         );
         assert_eq!(
-            step_radio((165, ChannelWidth::Mhz20), WIFI_WIDTH_ROW, 1, false),
+            step_radio((165, ChannelWidth::Mhz20), Item::WifiWidth, 1, false),
             (165, ChannelWidth::Mhz20)
-        );
-    }
-
-    #[test]
-    fn phone_rows_use_the_settings_row_geometry() {
-        assert_eq!(list_row_at(FIRST_ROW_Y, 2), Some(CONNECT_ROW));
-        assert_eq!(
-            list_row_at(list_row_y(1) + LIST_ROW_HEIGHT - 1, 2),
-            Some(FORGET_ROW)
-        );
-        assert_eq!(list_row_at(FIRST_ROW_Y + LIST_ROW_HEIGHT, 2), None);
-        assert_eq!(list_row_at(list_row_y(2), 2), None);
-        assert_eq!(
-            list_row_at(list_row_y(3), crate::MAXIMUM_KNOWN_PHONES),
-            Some(3)
         );
     }
 
@@ -2124,22 +2537,14 @@ mod tests {
     }
 
     #[test]
-    fn scrolling_rests_on_row_edges_so_the_title_gap_never_changes() {
-        let stops: Vec<i32> = SETTINGS_ROWS
-            .iter()
-            .map(|&(top, _)| top - FIRST_ROW_Y)
-            .collect();
-        let overflow = ADVANCED_ROW_Y + ADVANCED_ROW_HEIGHT + ROW_GAP - DISPLAY_HEIGHT as i32;
-        let maximum = stop_at_or_after(&stops, overflow);
-        assert!(maximum >= overflow);
-        assert_eq!(
-            SETTINGS_ROWS[EQUALIZER_ROW].0 - maximum,
-            FIRST_ROW_Y,
-            "at the bottom the first visible row sits where Phones sits at the top"
-        );
-        assert_eq!(stop_at_or_after(&stops, -5), 0);
-        assert_eq!(nearest_stop(&stops, 30), 0);
-        assert_eq!(nearest_stop(&stops, 50), stops[1]);
+    fn shapes_are_antialiased_at_their_edges() {
+        let mut canvas = Canvas::new();
+        canvas.circle(100, 100, 20, WHITE, 255);
+        let red = |x: usize, y: usize| canvas.rgb[(y * DISPLAY_WIDTH + x) * 3];
+        assert_eq!(red(100, 100), 255);
+        assert_eq!(red(100, 70), 0);
+        let edge = red(114, 113);
+        assert!(edge > 0 && edge < 255, "edge coverage {edge}");
     }
 
     #[test]
@@ -2155,15 +2560,6 @@ mod tests {
     }
 
     #[test]
-    fn rendered_settings_frame_is_nv12_for_the_car_thing_surface() {
-        let canvas = Canvas::new();
-        assert_eq!(
-            canvas.to_nv12().len(),
-            DISPLAY_WIDTH * DISPLAY_HEIGHT * 3 / 2
-        );
-    }
-
-    #[test]
     fn nv12_conversion_uses_limited_range_neutral_black_and_white() {
         assert_eq!(rgb_to_yuv(0, 0, 0), (16, 128, 128));
         assert_eq!(rgb_to_yuv(255, 255, 255), (235, 128, 128));
@@ -2172,14 +2568,15 @@ mod tests {
     #[test]
     fn built_in_font_covers_settings_labels() {
         for character in
-            "Settings Auto brightness night mode Phone audio Reported DPI Restore original On Off \
-             ‹ Phones › saved None Connect Disconnect Connected Connecting Forget Confirm \
-             No saved phones you connect wirelessly show up here Wireless is off Enable projection \
-             to manage Unable save settings Advanced Wi-Fi band Channel width 2.4 GHz 5 MHz \
-             change restarts after close Equalizer Reset flat Preamp +12.0 dB · Editing \
-             All USB output Music calls navigation assistants Boosts can clip Lower add headroom \
-             unavailable Update device image use bypasses 31.25 62.5 1k 2k 4k 8k 16k \
-             −24 EQ off curve saved USB audio only Turn choose Press adjust finish Release reduce"
+            "Settings Wireless Display Audio Phones Wi-Fi Auto brightness night mode Screen \
+             density Phone audio Keep sound on your phone Equalizer On Off None saved Ch 2.4 5 GHz \
+             Applies when settings close Unable to save apply equalizer Connected Connecting… \
+             CarPlay Android Auto · Connect Disconnect Forget this phone Press again to forget \
+             Density dpi Smaller Larger Reset to default CarPlay and Android Auto restart after \
+             Band Channel width MHz ‹ › restarts Wireless is off Enable wireless projection \
+             manage change No saved phones you connect wirelessly show up here Neel's \
+             Reset flat Preamp +12.0 dB All USB output EQ curve unavailable bypasses 31 63 125 \
+             250 500 1k 2k 4k 8k 16k −24 USB audio only Turn choose Press adjust finish Release"
                 .chars()
         {
             assert!(
@@ -2187,5 +2584,69 @@ mod tests {
                 "missing glyph {character:?}"
             );
         }
+    }
+
+    #[test]
+    fn every_page_renders_a_full_nv12_frame() {
+        let mut harness = Harness::new().with_phones();
+        let preview = std::env::var("PRELUDE_SETTINGS_PREVIEW")
+            .ok()
+            .map(PathBuf::from);
+        let capture = |harness: &Harness, name: &str| {
+            let frame = harness.ui.render();
+            assert_eq!(frame.len(), DISPLAY_WIDTH * DISPLAY_HEIGHT * 3 / 2);
+            if let Some(directory) = preview.as_ref() {
+                let mut canvas = Canvas::new();
+                harness.ui.render_into(&mut canvas);
+                let mut data = format!("P6\n{DISPLAY_WIDTH} {DISPLAY_HEIGHT}\n255\n").into_bytes();
+                data.extend(&canvas.rgb);
+                fs::create_dir_all(directory).expect("preview directory");
+                fs::write(directory.join(format!("{name}.ppm")), data).expect("write preview");
+            }
+        };
+        capture(&harness, "settings");
+        harness.focus(Item::Density);
+        capture(&harness, "settings-scrolled");
+        harness.focus(Item::PhoneAudio);
+        harness.press(KnobInputButton::Select);
+        harness.focus(Item::Wifi);
+        capture(&harness, "settings-bottom");
+        harness.focus(Item::Equalizer);
+        harness.press(KnobInputButton::Select);
+        capture(&harness, "equalizer");
+        harness.press(KnobInputButton::Back);
+        harness.focus(Item::Phones);
+        harness.press(KnobInputButton::Select);
+        capture(&harness, "phones");
+        harness.ui.pending_connect = Some("bb".to_owned());
+        harness.turn(1);
+        capture(&harness, "phones-connecting");
+        harness.press(KnobInputButton::Select);
+        harness.turn(1);
+        harness.press(KnobInputButton::Select);
+        capture(&harness, "phone-forget");
+        harness.ui.phones.clear();
+        harness.ui.go_back();
+        capture(&harness, "phones-empty");
+        harness.ui.go_back();
+        harness.focus(Item::Wifi);
+        harness.press(KnobInputButton::Select);
+        harness.turn(1);
+        harness.press(KnobInputButton::Select);
+        capture(&harness, "wifi-editing");
+        harness.ui.go_back();
+        harness.ui.wireless = false;
+        harness.press(KnobInputButton::Select);
+        capture(&harness, "wifi-off");
+        harness.ui.go_back();
+        harness.focus(Item::Density);
+        harness.press(KnobInputButton::Select);
+        capture(&harness, "density");
+        harness.press(KnobInputButton::Select);
+        harness.turn(6);
+        capture(&harness, "density-editing");
+        harness.ui.error_message = Some("Unable to save settings");
+        harness.ui.go_back();
+        capture(&harness, "settings-error");
     }
 }

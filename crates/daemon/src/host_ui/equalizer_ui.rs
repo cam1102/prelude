@@ -13,8 +13,11 @@ const PREAMP_LEFT: i32 = 218;
 const PREAMP_RIGHT: i32 = 632;
 const PREAMP_Y: i32 = 417;
 const THUMB_HIT_RADIUS: i32 = 22;
-const PREAMP: usize = 11;
-const RESET: usize = 12;
+pub(super) const HEADER_LEFT: i32 = 424;
+const RESET: usize = 0;
+const TOGGLE: usize = 1;
+const FIRST_BAND: usize = 2;
+const PREAMP: usize = FIRST_BAND + 10;
 const LABELS: [&str; 10] = [
     "31", "63", "125", "250", "500", "1k", "2k", "4k", "8k", "16k",
 ];
@@ -47,6 +50,10 @@ impl EqualizerUi {
         Ok(next)
     }
 
+    pub(super) fn focus_toggle(&mut self) {
+        self.focus = TOGGLE;
+    }
+
     pub(super) fn cancel_interaction(&mut self) {
         self.touched = None;
         self.drag_offset = None;
@@ -57,7 +64,7 @@ impl EqualizerUi {
     pub(super) fn new(settings: EqualizerSettings) -> Self {
         Self {
             settings,
-            focus: 0,
+            focus: TOGGLE,
             editing: false,
             touched: None,
             drag_offset: None,
@@ -71,7 +78,7 @@ impl EqualizerUi {
             KnobInputButton::Back if self.editing => self.editing = false,
             KnobInputButton::Back => return true,
             KnobInputButton::Select => match self.focus {
-                0 => {
+                TOGGLE => {
                     self.settings.enabled = !self.settings.enabled;
                     self.dirty = true;
                 }
@@ -97,15 +104,15 @@ impl EqualizerUi {
                 self.settings.preamp_half_db = (i16::from(self.settings.preamp_half_db) + delta)
                     .clamp(i16::from(MIN_PREAMP_HALF_DB), i16::from(MAX_PREAMP_HALF_DB))
                     as i8;
-            } else if (1..=10).contains(&self.focus) {
-                let gain = &mut self.settings.bands_half_db[self.focus - 1];
+            } else if let Some(band) = band(self.focus) {
+                let gain = &mut self.settings.bands_half_db[band];
                 *gain = (i16::from(*gain) + delta)
                     .clamp(i16::from(MIN_BAND_HALF_DB), i16::from(MAX_BAND_HALF_DB))
                     as i8;
             }
             self.dirty = true;
         } else {
-            self.focus = selection_after_rotary(self.focus, direction, steps, RESET);
+            self.focus = selection_after_rotary(self.focus, direction, steps, PREAMP);
         }
     }
 
@@ -119,10 +126,10 @@ impl EqualizerUi {
                 self.editing = false;
                 if let Some(focus) = self.touched {
                     self.focus = focus;
-                    if (1..=10).contains(&focus)
+                    if let Some(band) = band(focus)
                         && (TRACK_TOP - 18..=TRACK_BOTTOM + 18).contains(&y)
                     {
-                        let thumb_y = band_y(self.settings.bands_half_db[focus - 1]);
+                        let thumb_y = band_y(self.settings.bands_half_db[band]);
                         self.drag_offset = Some(if (y - thumb_y).abs() <= THUMB_HIT_RADIUS {
                             y - thumb_y
                         } else {
@@ -151,11 +158,11 @@ impl EqualizerUi {
                 let touched = self.touched.take();
                 let title_touched = std::mem::take(&mut self.title_touched);
                 if let Some(focus) = touched {
-                    if (1..=PREAMP).contains(&focus) {
+                    if (FIRST_BAND..=PREAMP).contains(&focus) {
                         self.drag(x, y);
                     }
                     self.drag_offset = None;
-                    if (focus == 0 || focus == RESET) && hit(x, y) == Some(focus) {
+                    if (focus == TOGGLE || focus == RESET) && hit(x, y) == Some(focus) {
                         self.button(KnobInputButton::Select);
                     }
                 } else if title_touched && back_hit(x, y) {
@@ -170,9 +177,9 @@ impl EqualizerUi {
         let Some(offset) = self.drag_offset else {
             return;
         };
-        if (1..=10).contains(&self.focus) {
+        if let Some(band) = band(self.focus) {
             let gain = band_gain(y - offset);
-            let current = &mut self.settings.bands_half_db[self.focus - 1];
+            let current = &mut self.settings.bands_half_db[band];
             self.dirty |= *current != gain;
             *current = gain;
         } else if self.focus == PREAMP {
@@ -187,50 +194,43 @@ impl EqualizerUi {
     }
 
     pub(super) fn render_header(&self, canvas: &mut Canvas, fonts: &FontSet) {
-        self.focus_frame(canvas, RESET, (440, 18, 128, 52));
-        canvas.text(fonts, "Reset", 472, TITLE_Y, 22.0, SECONDARY, true);
-        self.focus_frame(canvas, 0, (588, 18, 180, 52));
-        canvas.text(
-            fonts,
-            if self.settings.enabled { "On" } else { "Off" },
-            604,
-            TITLE_Y,
-            22.0,
-            if self.settings.enabled {
-                GREEN
-            } else {
-                SECONDARY
-            },
-            true,
-        );
+        let reset_focused = self.focus == RESET;
         canvas.rounded_rect(
-            664,
-            24,
-            80,
-            40,
+            448,
             20,
-            if self.settings.enabled { GREEN } else { WHITE },
-            if self.settings.enabled { 255 } else { 40 },
-        );
-        canvas.circle(
-            if self.settings.enabled { 724 } else { 684 },
-            TITLE_Y,
-            16,
-            WHITE,
+            112,
+            48,
+            24,
+            if reset_focused { FOCUS } else { GROUP },
             255,
         );
+        if reset_focused {
+            canvas.ring(442, 14, 124, 60, 30, 2.5, WHITE);
+        }
+        canvas.text_center(fonts, "Reset", 504, TITLE_Y, 23.0, WHITE, false);
+        let x = CONTENT_RIGHT - SWITCH_WIDTH;
+        canvas.switch(x, TITLE_Y, self.settings.enabled);
+        if self.focus == TOGGLE {
+            canvas.ring(
+                x - 6,
+                TITLE_Y - SWITCH_HEIGHT / 2 - 6,
+                SWITCH_WIDTH + 12,
+                SWITCH_HEIGHT + 12,
+                SWITCH_HEIGHT / 2 + 6,
+                2.5,
+                WHITE,
+            );
+        }
     }
 
     fn focus_frame(&self, canvas: &mut Canvas, focus: usize, bounds: (i32, i32, i32, i32)) {
         if self.focus == focus {
             let (x, y, width, height) = bounds;
-            let color = if self.adjusting(focus) {
-                GREEN
-            } else {
-                SECONDARY
-            };
-            canvas.rounded_rect(x, y, width, height, 10, color, 160);
-            canvas.rounded_rect(x + 2, y + 2, width - 4, height - 4, 8, [18, 18, 18], 255);
+            let radius = (height / 2).min(14);
+            canvas.rounded_rect(x, y, width, height, radius, FOCUS, 255);
+            if self.adjusting(focus) {
+                canvas.ring(x, y, width, height, radius, 2.0, GREEN);
+            }
         }
     }
 
@@ -253,15 +253,15 @@ impl EqualizerUi {
 
         let zero_y = band_y(0);
         for (label, y) in [("+12", TRACK_TOP), ("0", zero_y), ("−12", TRACK_BOTTOM)] {
-            canvas.text_right(fonts, label, 70, y, 16.0, SECONDARY, false);
+            canvas.text_right(fonts, label, 70, y, 18.0, SECONDARY, false);
         }
-        if (1..=10).contains(&self.focus) {
-            let x = BAND_LEFT + (self.focus - 1) as i32 * BAND_WIDTH + BAND_WIDTH / 2;
+        if let Some(band) = band(self.focus) {
+            let x = BAND_LEFT + band as i32 * BAND_WIDTH + BAND_WIDTH / 2;
             self.focus_frame(canvas, self.focus, (x - 28, 116, 56, 239));
         }
         canvas.rounded_rect(BAND_LEFT, zero_y, BAND_WIDTH * 10, 1, 0, WHITE, 55);
         for (index, gain) in self.settings.bands_half_db.iter().enumerate() {
-            let focus = index + 1;
+            let focus = index + FIRST_BAND;
             let x = BAND_LEFT + index as i32 * BAND_WIDTH + BAND_WIDTH / 2;
             let adjusting = self.adjusting(focus);
             let focused = self.focus == focus;
@@ -288,23 +288,23 @@ impl EqualizerUi {
             canvas.text(
                 fonts,
                 label,
-                x - fonts.text_width(label, 18.0, focused) / 2,
+                x - fonts.text_width(label, 21.0, focused) / 2,
                 BAND_LABEL_Y,
-                18.0,
+                21.0,
                 if focused { GREEN } else { SECONDARY },
                 focused,
             );
         }
-        let value = match self.focus {
-            1..=10 => format!(
+        let value = match (band(self.focus), self.focus) {
+            (Some(band), _) => format!(
                 "{} Hz  ·  {}",
-                prelude_media::EQUALIZER_FREQUENCIES_HZ[self.focus - 1],
-                gain_label(self.settings.bands_half_db[self.focus - 1]),
+                prelude_media::EQUALIZER_FREQUENCIES_HZ[band],
+                gain_label(self.settings.bands_half_db[band]),
             ),
-            PREAMP => format!("Preamp  ·  {}", gain_label(self.settings.preamp_half_db)),
+            (None, PREAMP) => format!("Preamp  ·  {}", gain_label(self.settings.preamp_half_db)),
             _ => "Select a band to adjust".to_owned(),
         };
-        canvas.text(fonts, &value, CONTENT_X, 374, 23.0, WHITE, true);
+        canvas.text(fonts, &value, CONTENT_X, 372, 26.0, WHITE, false);
         let hint = if self.editing {
             "Turn to adjust · Press to finish"
         } else if self.drag_offset.is_some() {
@@ -316,27 +316,27 @@ impl EqualizerUi {
             hint,
             CAPTION_SIZE,
             false,
-            CONTENT_RIGHT - CONTENT_X - fonts.text_width(&value, 23.0, true) - 24,
+            CONTENT_RIGHT - CONTENT_X - fonts.text_width(&value, 26.0, false) - 24,
         );
         canvas.text_right(
             fonts,
             &hint,
             CONTENT_RIGHT,
-            374,
+            372,
             CAPTION_SIZE,
             SECONDARY,
             false,
         );
 
         canvas.rounded_rect(CONTENT_X, 392, CONTENT_RIGHT - CONTENT_X, 1, 0, WHITE, 35);
-        self.focus_frame(canvas, PREAMP, (32, 398, 736, 58));
-        canvas.text(fonts, "Preamp", CONTENT_X, PREAMP_Y, 21.0, WHITE, true);
+        self.focus_frame(canvas, PREAMP, (GROUP_X + 4, 398, GROUP_WIDTH - 8, 58));
+        canvas.text(fonts, "Preamp", CONTENT_X, PREAMP_Y, 24.0, WHITE, false);
         canvas.text_right(
             fonts,
             &gain_label(self.settings.preamp_half_db),
             CONTENT_RIGHT,
             PREAMP_Y,
-            19.0,
+            22.0,
             if self.adjusting(PREAMP) { GREEN } else { WHITE },
             true,
         );
@@ -387,9 +387,9 @@ impl EqualizerUi {
             canvas.text(
                 fonts,
                 label,
-                x - fonts.text_width(label, 14.0, false) / 2,
+                x - fonts.text_width(label, 16.0, false) / 2,
                 444,
-                14.0,
+                16.0,
                 SECONDARY,
                 false,
             );
@@ -401,6 +401,12 @@ impl EqualizerUi {
             canvas.text(fonts, footer, CONTENT_X, 469, CAPTION_SIZE, RED, false);
         }
     }
+}
+
+fn band(focus: usize) -> Option<usize> {
+    (FIRST_BAND..PREAMP)
+        .contains(&focus)
+        .then(|| focus - FIRST_BAND)
 }
 
 fn gain_label(gain: i8) -> String {
@@ -430,14 +436,14 @@ fn back_hit(x: i32, y: i32) -> bool {
 fn hit(x: i32, y: i32) -> Option<usize> {
     if (18..70).contains(&y) {
         if (588..768).contains(&x) {
-            return Some(0);
+            return Some(TOGGLE);
         }
         if (440..568).contains(&x) {
             return Some(RESET);
         }
     }
     if (116..356).contains(&y) && (BAND_LEFT..BAND_LEFT + BAND_WIDTH * 10).contains(&x) {
-        return Some(((x - BAND_LEFT) / BAND_WIDTH) as usize + 1);
+        return Some(((x - BAND_LEFT) / BAND_WIDTH) as usize + FIRST_BAND);
     }
     if (398..456).contains(&y) && (32..768).contains(&x) {
         return Some(PREAMP);
@@ -476,7 +482,7 @@ mod tests {
             ui.touch(TouchInputPhase::Down, x, BAND_LABEL_Y as u16);
             ui.touch(TouchInputPhase::Move, x, TRACK_TOP as u16);
             ui.touch(TouchInputPhase::Up, x, TRACK_TOP as u16);
-            assert_eq!(ui.focus, index as usize + 1);
+            assert_eq!(ui.focus, index as usize + FIRST_BAND);
             assert_eq!(ui.settings, original);
             assert!(!ui.dirty);
         }
@@ -555,7 +561,7 @@ mod tests {
         assert_eq!(band_gain(999), MIN_BAND_HALF_DB);
         assert_eq!(preamp_gain(-999), MIN_PREAMP_HALF_DB);
         assert_eq!(preamp_gain(999), MAX_PREAMP_HALF_DB);
-        ui.focus = 0;
+        ui.focus = TOGGLE;
         ui.button(KnobInputButton::Select);
         ui.focus = RESET;
         ui.button(KnobInputButton::Select);
@@ -565,6 +571,12 @@ mod tests {
     #[test]
     fn knob_edits_half_db_and_back_finishes_before_leaving() {
         let mut ui = EqualizerUi::new(Default::default());
+        assert_eq!(ui.focus, TOGGLE, "the page opens on the on/off toggle");
+        ui.rotary(RotaryDirection::CounterClockwise, 1);
+        assert_eq!(ui.focus, RESET, "reset sits before the toggle");
+        ui.rotary(RotaryDirection::Clockwise, 100);
+        assert_eq!(ui.focus, PREAMP, "preamp ends the list");
+        ui.focus_toggle();
         ui.rotary(RotaryDirection::Clockwise, 1);
         ui.button(KnobInputButton::Select);
         ui.rotary(RotaryDirection::Clockwise, 1);
@@ -627,14 +639,14 @@ mod tests {
         });
         let fonts = FontSet::load();
         for (name, focus, editing, enabled) in [
-            ("focused", 4, false, true),
-            ("editing", 4, true, true),
-            ("off", 0, false, false),
+            ("focused", FIRST_BAND + 3, false, true),
+            ("editing", FIRST_BAND + 3, true, true),
+            ("off", TOGGLE, false, false),
             ("preamp", PREAMP, true, true),
-            ("phone-audio", 10, false, true),
+            ("phone-audio", FIRST_BAND + 9, false, true),
             ("unavailable", RESET, false, true),
-            ("save-error", 1, false, true),
-            ("fallback-font", 10, false, true),
+            ("save-error", FIRST_BAND, false, true),
+            ("fallback-font", FIRST_BAND + 9, false, true),
         ] {
             ui.focus = focus;
             ui.editing = editing;
@@ -662,10 +674,11 @@ mod tests {
                 (name == "save-error").then_some("Unable to save settings"),
             );
             canvas.scroll(0, 0);
+            canvas.chevron(BACK_X, TITLE_Y, 12, false, WHITE, 4.0);
             canvas.text(
                 fonts,
-                "‹ Equalizer",
-                CONTENT_X,
+                "Equalizer",
+                BACK_TITLE_X,
                 TITLE_Y,
                 TITLE_SIZE,
                 WHITE,
