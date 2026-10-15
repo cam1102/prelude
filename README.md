@@ -92,6 +92,14 @@ Prelude supports both wired and wireless connections.
 - Press right-most top hardware button to open settings.
 - Hold the right-most top hardware button to trigger Siri/Google Assistant.
 
+### Equalizer
+
+Open **Settings → Equalizer** to adjust the ten bands (31.25 Hz to 16 kHz) and preamp.
+
+Drag a band vertically or the preamp horizontally. With the knob, rotate to select a control, press to edit, and rotate to adjust in 0.5 dB steps. Press again to finish editing. Adjustments take effect live and save when you release a slider or finish an edit. Negative preamp cannot guarantee clipping-free output for every signal and curve.
+
+The equalizer affects all USB DAC output, including music, navigation, calls and assistants, for both CarPlay and Android Auto. **Phone audio bypasses it**, and the microphone is unaffected.
+
 ### Uninstall
 
 Use a tool of your choice (`flashthing-cli` with stock firmware, or Terbium for the old Buildroot path) to flash stock or a different firmware.

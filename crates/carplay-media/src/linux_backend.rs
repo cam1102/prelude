@@ -35,6 +35,10 @@ use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use gstreamer_video::{VideoFrameExt, VideoFrameRef, VideoInfo};
 
+#[path = "output_equalizer.rs"]
+mod output_equalizer;
+use output_equalizer::OutputEqualizer;
+
 const WORKER_POLL: Duration = Duration::from_millis(10);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const GST_STATE_TIMEOUT: gst::ClockTime = gst::ClockTime::from_seconds(2);
@@ -1023,6 +1027,7 @@ fn render_sample(
 
 #[derive(Debug, Clone)]
 pub struct LinuxAudioBackendConfig {
+    pub equalizer: crate::EqualizerControl,
     pub route: AudioOutputRoute,
     pub streams: Vec<AudioStreamConfig>,
     pub command_capacity: usize,
@@ -1050,6 +1055,7 @@ impl LinuxAudioBackendConfig {
 
     pub fn with_negotiated_route(route: AudioOutputRoute, streams: Vec<AudioStreamConfig>) -> Self {
         Self {
+            equalizer: Default::default(),
             route,
             streams,
             command_capacity: DEFAULT_COMMAND_CAPACITY,
@@ -1337,6 +1343,7 @@ impl LinuxAudioBackend {
                 audio_worker(AudioWorkerContext {
                     plan,
                     output,
+                    equalizer: config.equalizer,
                     frames: frame_receivers,
                     controls: control_rx,
                     cancel: worker_cancel,
@@ -1635,6 +1642,7 @@ impl Drop for LinuxAudioBackend {
 }
 
 struct AudioGstPipeline {
+    equalizer: Option<OutputEqualizer>,
     pipeline: gst::Pipeline,
     sink: gst::Element,
     test_tone: gst::Element,
@@ -1704,6 +1712,7 @@ impl PcmClockOrigin {
 }
 
 struct AudioWorkerContext {
+    equalizer: crate::EqualizerControl,
     plan: AudioMixerPlan,
     output: ResolvedAudioOutput,
     frames: BTreeMap<AudioStreamId, Receiver<QueuedAudioFrame>>,
@@ -1798,6 +1807,7 @@ fn audio_worker(context: AudioWorkerContext) -> Result<()> {
     let AudioWorkerContext {
         plan,
         output,
+        equalizer,
         frames,
         controls,
         cancel,
@@ -1814,7 +1824,7 @@ fn audio_worker(context: AudioWorkerContext) -> Result<()> {
         revalidate_audio_output(&output, &telemetry)?;
         prime_alsa_output(output.device(), plan.latency)?;
         revalidate_audio_output(&output, &telemetry)?;
-        AudioGstPipeline::start(plan, output.device())
+        AudioGstPipeline::start_with_equalizer(plan, output.device(), equalizer.clone())
     })();
     let (mut active, _registration) = match initialized {
         Ok(mut active) => {
@@ -1832,6 +1842,7 @@ fn audio_worker(context: AudioWorkerContext) -> Result<()> {
             (active, PipelineRegistration::new(&pipeline_control))
         }
         Err(error) => {
+            equalizer.report_availability(crate::EqualizerAvailability::Unavailable);
             let _ = startup.send(Err(error));
             return Ok(());
         }
@@ -1845,6 +1856,14 @@ fn audio_worker(context: AudioWorkerContext) -> Result<()> {
     let mut muted = false;
     let mut test_tone_until = None;
     while !cancel.load(Ordering::Acquire) {
+        if let Some(dsp) = active.equalizer.as_mut()
+            && let Err(error) = dsp.tick()
+        {
+            update_audio_telemetry(&telemetry, AudioBackendTelemetry::pipeline_failed);
+            report_failure(&errors, "audio", &error);
+            stop_audio_pipeline(&mut active, &telemetry)?;
+            return Err(error);
+        }
         if let Some((ramp, started)) = main_gain_ramp {
             let elapsed = started.elapsed();
             let next_gain = ramp.gain_at(elapsed);
@@ -2015,8 +2034,27 @@ fn audio_worker(context: AudioWorkerContext) -> Result<()> {
     stop_audio_pipeline(&mut active, &telemetry)
 }
 
+fn floating_mix_caps(plan: &AudioMixerPlan) -> Result<gst::Caps> {
+    let mut mix = plan.output_caps.clone();
+    for (name, value) in &mut mix.fields {
+        if *name == "format" {
+            *value = CapsValue::String("F32LE".to_owned());
+        }
+    }
+    caps(&mix)
+}
+
 impl AudioGstPipeline {
+    #[cfg(test)]
     fn start(plan: AudioMixerPlan, alsa_device: &str) -> Result<Self> {
+        Self::start_with_equalizer(plan, alsa_device, Default::default())
+    }
+
+    fn start_with_equalizer(
+        plan: AudioMixerPlan,
+        alsa_device: &str,
+        equalizer_control: crate::EqualizerControl,
+    ) -> Result<Self> {
         let pipeline = gst::Pipeline::new();
         let clock = gst::SystemClock::obtain();
         pipeline.use_clock(Some(&clock));
@@ -2038,11 +2076,18 @@ impl AudioGstPipeline {
             "latency-time",
             i64::from(plan.latency.sink_period_micros),
         )?;
+        let mix_caps = make("capsfilter", "float-mixer-output")?;
+        set_checked(&mix_caps, "caps", floating_mix_caps(&plan)?)?;
+        let equalizer = OutputEqualizer::create(equalizer_control)?;
+        let mut output_elements = vec![&mixer, &mix_caps];
+        if let Some(dsp) = equalizer.as_ref() {
+            output_elements.extend(dsp.elements());
+        }
+        output_elements.extend([&output_convert, &output_caps, &sink]);
         pipeline
-            .add_many([&mixer, &output_convert, &output_caps, &sink])
+            .add_many(&output_elements)
             .map_err(gst_error("cannot add audio output elements"))?;
-        gst::Element::link_many([&mixer, &output_convert, &output_caps, &sink])
-            .map_err(gst_error("cannot link audio output"))?;
+        gst::Element::link_many(&output_elements).map_err(gst_error("cannot link audio output"))?;
         let test_tone = make("audiotestsrc", "audio-output-test-tone")?;
         set_checked(&test_tone, "is-live", true)?;
         set_checked(&test_tone, "freq", 440.0_f64)?;
@@ -2051,7 +2096,7 @@ impl AudioGstPipeline {
         let test_convert = make("audioconvert", "test-tone-converter")?;
         let test_resample = make("audioresample", "test-tone-resampler")?;
         let test_caps = make("capsfilter", "test-tone-output-caps")?;
-        set_checked(&test_caps, "caps", caps(&plan.output_caps)?)?;
+        set_checked(&test_caps, "caps", floating_mix_caps(&plan)?)?;
         let test_queue = make("queue", "test-tone-queue")?;
         pipeline
             .add_many([
@@ -2101,7 +2146,7 @@ impl AudioGstPipeline {
             let convert = make("audioconvert", &format!("audio-converter-{suffix}"))?;
             let resample = make("audioresample", &format!("audio-resampler-{suffix}"))?;
             let branch_caps = make("capsfilter", &format!("mixer-input-caps-{suffix}"))?;
-            set_checked(&branch_caps, "caps", caps(&plan.output_caps)?)?;
+            set_checked(&branch_caps, "caps", floating_mix_caps(&plan)?)?;
             let mixer_queue = make("queue", &format!("mixer-input-queue-{suffix}"))?;
             set_checked(&mixer_queue, "max-size-time", 200_000_000_u64)?;
             set_checked(&mixer_queue, "max-size-bytes", 0_u32)?;
@@ -2152,6 +2197,7 @@ impl AudioGstPipeline {
             return Err(error);
         }
         Ok(Self {
+            equalizer,
             pipeline,
             sink,
             test_tone,
@@ -3874,6 +3920,142 @@ mod tests {
         assert_eq!(telemetry.pipeline_start_events, 1);
         assert_eq!(telemetry.pipeline_stop_events, 0);
         backend.shutdown().expect("stop live null backend");
+    }
+
+    #[test]
+    fn live_equalizer_survives_backend_reconnect_without_restarts_and_coexists_with_mute_duck() {
+        if gst::init().is_err()
+            || ["equalizer-nbands", "volume", "alsasink"]
+                .into_iter()
+                .any(|factory| gst::ElementFactory::find(factory).is_none())
+        {
+            require_host_audio_or_skip("equalizer elements unavailable");
+            return;
+        }
+        let control = crate::EqualizerControl::default();
+        let saved = crate::EqualizerSettings {
+            enabled: true,
+            bands_half_db: [6; 10],
+            preamp_half_db: -12,
+        };
+        control.set(saved).expect("set before backend exists");
+        let format = AudioFormatId::new(0x8000);
+        let mut config = LinuxAudioBackendConfig::with_negotiated_route(
+            AudioOutputRoute::TestAlsa("null".to_owned()),
+            vec![AudioStreamConfig::new(AudioStreamId::Main, format)],
+        );
+        config.equalizer = control.clone();
+        for reconnect in 0..2 {
+            let backend = LinuxAudioBackend::start(config.clone()).expect("start/reconnect");
+            backend
+                .configure_stream(AudioStreamConfig::new(AudioStreamId::Main, format), 1)
+                .expect("activate stream");
+            backend
+                .try_submit_generation(
+                    1,
+                    EncryptedAudioFrame {
+                        stream_id: AudioStreamId::Main,
+                        format_id: format,
+                        codec: format.codec().expect("PCM"),
+                        sequence: 0,
+                        timestamp: 0,
+                        ssrc: 7,
+                        nonce_counter: 0,
+                        payload: vec![0; 480 * 2 * 2],
+                        rtp_packet: vec![0; 12],
+                    },
+                )
+                .expect("real PCM frame");
+            let ready = Instant::now() + Duration::from_secs(1);
+            while backend.telemetry().expect("telemetry").frames_pushed < 1 {
+                assert!(Instant::now() < ready, "audio worker did not consume PCM");
+                thread::sleep(Duration::from_millis(5));
+            }
+            let pipeline = backend
+                .pipeline_control
+                .lock()
+                .expect("control")
+                .clone()
+                .expect("pipeline");
+            let preamp = pipeline.by_name("usb-output-preamp").expect("preamp");
+            assert!(
+                (preamp.property::<f64>("volume") - crate::db_to_linear(-6.0)).abs() < 0.00001,
+                "new backend inherits latest preamp"
+            );
+            let mix_filter = pipeline
+                .by_name("float-mixer-output")
+                .expect("float DSP caps");
+            assert_eq!(
+                mix_filter
+                    .property::<gst::Caps>("caps")
+                    .structure(0)
+                    .expect("structure")
+                    .get::<String>("format")
+                    .expect("format"),
+                "F32LE"
+            );
+            let dac_filter = pipeline.by_name("mixer-output-caps").expect("DAC caps");
+            assert_eq!(
+                dac_filter
+                    .property::<gst::Caps>("caps")
+                    .structure(0)
+                    .expect("structure")
+                    .get::<String>("format")
+                    .expect("format"),
+                "S16LE"
+            );
+            backend.set_muted(true).expect("mute");
+            backend
+                .set_ducking_gain_ramped(true, Some(0.25), Duration::from_millis(20))
+                .expect("duck");
+            for gain in -24..=24 {
+                control
+                    .set(crate::EqualizerSettings {
+                        bands_half_db: [gain; 10],
+                        ..saved
+                    })
+                    .expect("live adjustment");
+            }
+            control
+                .set(crate::EqualizerSettings {
+                    enabled: false,
+                    ..saved
+                })
+                .expect("bypass");
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while (preamp.property::<f64>("volume") - 1.0).abs() > 0.00001 {
+                assert!(
+                    Instant::now() < deadline,
+                    "bypass failed to settle: volume={}, telemetry={:?}, error={:?}",
+                    preamp.property::<f64>("volume"),
+                    backend.telemetry(),
+                    backend.try_error()
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(control.settings().bands_half_db, saved.bands_half_db);
+            backend.set_muted(false).expect("unmute");
+            control.set(saved).expect("reenable");
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while (preamp.property::<f64>("volume") - crate::db_to_linear(-6.0)).abs() > 0.00001 {
+                assert!(
+                    Instant::now() < deadline,
+                    "enable failed to settle: telemetry={:?}, error={:?}",
+                    backend.telemetry(),
+                    backend.try_error()
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(
+                backend.pipeline_control.lock().expect("control").as_ref(),
+                Some(&pipeline)
+            );
+            let telemetry = backend.telemetry().expect("telemetry");
+            assert_eq!(telemetry.pipeline_start_events, 1, "reconnect {reconnect}");
+            assert_eq!(telemetry.pipeline_stop_events, 0);
+            assert_eq!(telemetry.last_failure, None);
+            backend.shutdown().expect("shutdown");
+        }
     }
 
     #[test]

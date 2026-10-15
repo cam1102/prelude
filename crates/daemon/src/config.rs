@@ -339,6 +339,8 @@ impl Default for PlatformConfig {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MediaConfig {
+    #[serde(skip)]
+    pub equalizer: prelude_media::EqualizerControl,
     pub video: VideoBackend,
     pub audio: AudioBackend,
     pub microphone: AudioBackend,
@@ -364,6 +366,7 @@ impl std::fmt::Debug for MediaConfig {
 impl Default for MediaConfig {
     fn default() -> Self {
         Self {
+            equalizer: Default::default(),
             video: VideoBackend::None,
             audio: AudioBackend::None,
             microphone: AudioBackend::None,

@@ -23,6 +23,9 @@ use tracing::{debug, info, warn};
 
 use crate::{KnownPhone, RuntimeSettings, WirelessPhoneDirectory};
 
+mod equalizer_ui;
+use equalizer_ui::EqualizerUi;
+
 const DISPLAY_WIDTH: usize = 800;
 const DISPLAY_HEIGHT: usize = 480;
 const MAXIMUM_FONT_BYTES: u64 = 8 * 1024 * 1024;
@@ -60,11 +63,13 @@ const AUTO_NIGHT_MODE_ROW: usize = 2;
 const AUTO_NIGHT_MODE_ROW_Y: i32 = AUTO_BRIGHTNESS_ROW_Y + TOGGLE_ROW_HEIGHT + ROW_GAP;
 const PHONE_AUDIO_ROW: usize = 3;
 const PHONE_AUDIO_ROW_Y: i32 = AUTO_NIGHT_MODE_ROW_Y + TOGGLE_ROW_HEIGHT + ROW_GAP;
-const DPI_ROW: usize = 4;
-const DPI_ROW_Y: i32 = PHONE_AUDIO_ROW_Y + TOGGLE_ROW_HEIGHT + ROW_GAP;
-const RESTORE_DPI_ROW: usize = 5;
+const EQUALIZER_ROW: usize = 4;
+const EQUALIZER_ROW_Y: i32 = PHONE_AUDIO_ROW_Y + TOGGLE_ROW_HEIGHT + ROW_GAP;
+const DPI_ROW: usize = 5;
+const DPI_ROW_Y: i32 = EQUALIZER_ROW_Y + TOGGLE_ROW_HEIGHT + ROW_GAP;
+const RESTORE_DPI_ROW: usize = 6;
 const RESTORE_DPI_ROW_Y: i32 = DPI_ROW_Y + DPI_ROW_HEIGHT + ROW_GAP;
-const ADVANCED_ROW: usize = 6;
+const ADVANCED_ROW: usize = 7;
 const ADVANCED_ROW_Y: i32 = RESTORE_DPI_ROW_Y + RESTORE_ROW_HEIGHT + ROW_GAP;
 const ADVANCED_ROW_HEIGHT: i32 = TOGGLE_ROW_HEIGHT;
 const SLIDER_X: i32 = ROW_X + ROW_INSET;
@@ -114,6 +119,7 @@ impl HostUi {
         display: LinuxDisplayHandle,
         state_dir: PathBuf,
         settings: RuntimeSettings,
+        equalizer_control: prelude_media::EqualizerControl,
         ambient_light: Option<AmbientLightControl>,
         phones: Option<WirelessPhoneDirectory>,
     ) -> Result<Self, String> {
@@ -129,6 +135,7 @@ impl HostUi {
                     display,
                     state_dir,
                     settings,
+                    equalizer_control,
                     ambient_light,
                     phones,
                     events_tx,
@@ -217,9 +224,12 @@ enum Page {
     Phones,
     Phone,
     Advanced,
+    Equalizer,
 }
 
 struct SettingsUi {
+    equalizer_control: prelude_media::EqualizerControl,
+    equalizer_ui: EqualizerUi,
     display: LinuxDisplayHandle,
     state_dir: PathBuf,
     settings: RuntimeSettings,
@@ -257,10 +267,12 @@ struct SettingsUi {
 }
 
 impl SettingsUi {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         display: LinuxDisplayHandle,
         state_dir: PathBuf,
         settings: RuntimeSettings,
+        equalizer_control: prelude_media::EqualizerControl,
         ambient_light: Option<AmbientLightControl>,
         directory: Option<WirelessPhoneDirectory>,
         events: Sender<HostUiEvent>,
@@ -271,6 +283,8 @@ impl SettingsUi {
             control.set_automatic_night_mode(settings.auto_night_mode);
         }
         Self {
+            equalizer_control,
+            equalizer_ui: EqualizerUi::new(settings.equalizer),
             display,
             state_dir,
             settings,
@@ -321,6 +335,7 @@ impl SettingsUi {
                 if self.menu_open && !pressed =>
             {
                 match self.page {
+                    Page::Equalizer => self.handle_equalizer_button(button),
                     Page::Settings => self.handle_knob_release(button),
                     Page::Phones | Page::Phone | Page::Advanced => {
                         self.handle_list_knob_release(button);
@@ -329,6 +344,10 @@ impl SettingsUi {
             }
             PlatformInputEventKind::Rotary { direction, steps } if self.menu_open => {
                 match self.page {
+                    Page::Equalizer => {
+                        self.equalizer_ui.rotary(direction, steps);
+                        self.apply_equalizer();
+                    }
                     Page::Settings => self.handle_rotary(direction, steps),
                     Page::Phones | Page::Phone | Page::Advanced => {
                         self.handle_list_rotary(direction, steps);
@@ -341,10 +360,13 @@ impl SettingsUi {
                 x,
                 y,
             } if self.menu_open => match self.page {
+                Page::Equalizer => self.handle_equalizer_touch(phase, x, y),
                 Page::Settings => self.handle_touch(phase, x, y),
                 Page::Phones | Page::Phone | Page::Advanced => self.handle_list_touch(phase, x, y),
             },
             PlatformInputEventKind::Reset { .. } if self.menu_open => {
+                self.equalizer_ui.cancel_interaction();
+                self.save_equalizer();
                 self.touch_target = None;
                 self.dpi_dragging = false;
                 self.dpi_editing = false;
@@ -363,7 +385,8 @@ impl SettingsUi {
             let phones = self.phones.clone();
             let active = self.active_phone.clone();
             self.refresh_phones();
-            if phones != self.phones || active != self.active_phone {
+            if self.page == Page::Equalizer || phones != self.phones || active != self.active_phone
+            {
                 self.redraw();
             }
         }
@@ -393,6 +416,7 @@ impl SettingsUi {
 
     fn list_len(&self) -> usize {
         match self.page {
+            Page::Equalizer => 0,
             Page::Settings => SETTINGS_ROWS.len(),
             Page::Phones => self.phones.len(),
             Page::Phone => PHONE_ACTION_ROWS,
@@ -407,6 +431,7 @@ impl SettingsUi {
 
     fn list_focus(&self) -> usize {
         match self.page {
+            Page::Equalizer => 0,
             Page::Settings => self.selected,
             Page::Phones => self.phone_focus,
             Page::Phone => self.phone_action,
@@ -416,6 +441,7 @@ impl SettingsUi {
 
     fn row_stops(&self) -> Vec<i32> {
         match self.page {
+            Page::Equalizer => Vec::new(),
             Page::Settings => SETTINGS_ROWS
                 .iter()
                 .map(|&(top, _)| top - FIRST_ROW_Y)
@@ -428,6 +454,7 @@ impl SettingsUi {
 
     fn maximum_scroll(&self) -> i32 {
         let content_bottom = match self.page {
+            Page::Equalizer => DISPLAY_HEIGHT as i32,
             Page::Settings => ADVANCED_ROW_Y + ADVANCED_ROW_HEIGHT + ROW_GAP,
             Page::Phones | Page::Phone | Page::Advanced => list_row_y(self.list_len()),
         };
@@ -510,6 +537,7 @@ impl SettingsUi {
 
     fn close(&mut self) {
         let mut next = self.settings;
+        next.equalizer = self.equalizer_ui.settings;
         next.reported_dpi = self.staged_dpi;
         next.dpi_customized = self.staged_dpi_customized;
         next.phone_audio = self.staged_phone_audio;
@@ -551,6 +579,7 @@ impl SettingsUi {
 
     fn close_without_commit(&mut self) {
         if self.menu_open {
+            let _ = self.save_equalizer();
             if let Err(error) = self.display.clear_overlay() {
                 warn!(%error, "could not clear the host settings UI during shutdown");
             }
@@ -578,6 +607,7 @@ impl SettingsUi {
                 AUTO_BRIGHTNESS_ROW => self.toggle_auto_brightness(),
                 AUTO_NIGHT_MODE_ROW => self.toggle_auto_night_mode(),
                 PHONE_AUDIO_ROW => self.toggle_phone_audio(),
+                EQUALIZER_ROW => self.enter_equalizer_page(),
                 DPI_ROW => {
                     self.dpi_editing = !self.dpi_editing;
                     self.redraw();
@@ -650,6 +680,7 @@ impl SettingsUi {
                         self.toggle_auto_night_mode();
                     }
                     Some(PHONE_AUDIO_ROW) if released_on_target => self.toggle_phone_audio(),
+                    Some(EQUALIZER_ROW) if released_on_target => self.enter_equalizer_page(),
                     Some(RESTORE_DPI_ROW) if released_on_target => self.restore_original_dpi(),
                     Some(PHONES_ROW) if released_on_target => self.enter_phones_page(),
                     Some(ADVANCED_ROW) if released_on_target => self.enter_advanced_page(),
@@ -695,6 +726,56 @@ impl SettingsUi {
         self.redraw();
     }
 
+    fn enter_equalizer_page(&mut self) {
+        self.equalizer_ui.cancel_interaction();
+        self.page = Page::Equalizer;
+        self.scroll = 0;
+        self.redraw();
+    }
+
+    fn apply_equalizer(&mut self) {
+        if let Err(error) = self.equalizer_control.set(self.equalizer_ui.settings) {
+            warn!(%error, "could not apply equalizer");
+            self.error_message = Some("Unable to apply equalizer");
+        } else {
+            self.error_message = None;
+        }
+        self.redraw();
+    }
+
+    fn save_equalizer(&mut self) -> bool {
+        if !self.equalizer_ui.dirty {
+            return true;
+        }
+        match self.equalizer_ui.persist(&self.state_dir, self.settings) {
+            Ok(next) => self.settings = next,
+            Err(error) => {
+                warn!(%error, "could not save equalizer");
+                self.error_message = Some("Unable to save settings");
+                self.redraw();
+                return false;
+            }
+        }
+        self.error_message = None;
+        true
+    }
+
+    fn handle_equalizer_button(&mut self, button: KnobInputButton) {
+        let leave = self.equalizer_ui.button(button);
+        self.apply_equalizer();
+        if self.save_equalizer() && leave {
+            self.go_back();
+        }
+    }
+
+    fn handle_equalizer_touch(&mut self, phase: TouchInputPhase, x: u16, y: u16) {
+        let leave = self.equalizer_ui.touch(phase, x, y);
+        self.apply_equalizer();
+        if phase == TouchInputPhase::Up && self.save_equalizer() && leave {
+            self.go_back();
+        }
+    }
+
     fn enter_advanced_page(&mut self) {
         self.page = Page::Advanced;
         self.wifi_focus = WIFI_BAND_ROW;
@@ -704,6 +785,7 @@ impl SettingsUi {
     }
 
     fn leave_subpage(&mut self) {
+        self.equalizer_ui.cancel_interaction();
         self.page = Page::Settings;
         self.opened_phone = None;
         let (top, height) = SETTINGS_ROWS[self.selected];
@@ -759,6 +841,7 @@ impl SettingsUi {
 
     fn focus_list_row(&mut self, row: usize) {
         match self.page {
+            Page::Equalizer => {}
             Page::Settings => self.selected = row,
             Page::Phones => self.phone_focus = row,
             Page::Phone => {
@@ -816,7 +899,7 @@ impl SettingsUi {
 
     fn choose_list_row(&mut self, row: usize) {
         match self.page {
-            Page::Settings => {}
+            Page::Settings | Page::Equalizer => {}
             Page::Phones => self.open_phone(row),
             Page::Phone if row == CONNECT_ROW => self.connect_opened_phone(),
             Page::Phone => self.forget_opened_phone(),
@@ -927,6 +1010,13 @@ impl SettingsUi {
         let mut canvas = Canvas::new();
         canvas.scroll(self.scroll, VIEWPORT_TOP);
         match self.page {
+            Page::Equalizer => self.equalizer_ui.render(
+                &mut canvas,
+                &self.fonts,
+                self.staged_phone_audio,
+                self.equalizer_control.availability(),
+                self.error_message,
+            ),
             Page::Settings => self.render_settings_rows(&mut canvas),
             Page::Phones => self.render_phones(&mut canvas),
             Page::Phone => self.render_phone_actions(&mut canvas),
@@ -941,6 +1031,7 @@ impl SettingsUi {
                 true,
                 CONTENT_RIGHT - CONTENT_X,
             ),
+            (Page::Equalizer, _) => "‹ Equalizer".to_owned(),
             (Page::Settings, _) => "Settings".to_owned(),
             (Page::Advanced, _) => "‹ Advanced".to_owned(),
             _ => "‹ Phones".to_owned(),
@@ -954,7 +1045,9 @@ impl SettingsUi {
             WHITE,
             true,
         );
-        if let Some(message) = self.error_message {
+        if self.page == Page::Equalizer {
+            self.equalizer_ui.render_header(&mut canvas, &self.fonts);
+        } else if let Some(message) = self.error_message {
             canvas.text_right(
                 &self.fonts,
                 message,
@@ -1001,6 +1094,26 @@ impl SettingsUi {
             "Phone audio",
             self.staged_phone_audio,
             PHONE_AUDIO_ROW,
+        );
+        self.render_row(
+            canvas,
+            EQUALIZER_ROW_Y,
+            TOGGLE_ROW_HEIGHT,
+            "Equalizer",
+            EQUALIZER_ROW,
+        );
+        canvas.text_right(
+            &self.fonts,
+            if self.equalizer_ui.settings.enabled {
+                "On  ›"
+            } else {
+                "Off  ›"
+            },
+            CONTENT_RIGHT,
+            EQUALIZER_ROW_Y + ROW_TEXT_CENTER,
+            VALUE_SIZE,
+            SECONDARY,
+            false,
         );
         self.render_dpi_row(canvas);
         self.render_reset_row(canvas);
@@ -1420,11 +1533,12 @@ fn step_radio(
     (channel, width.min(ChannelWidth::widest_for(channel)))
 }
 
-const SETTINGS_ROWS: [(i32, i32); 7] = [
+const SETTINGS_ROWS: [(i32, i32); 8] = [
     (PHONES_ROW_Y, PHONES_ROW_HEIGHT),
     (AUTO_BRIGHTNESS_ROW_Y, TOGGLE_ROW_HEIGHT),
     (AUTO_NIGHT_MODE_ROW_Y, TOGGLE_ROW_HEIGHT),
     (PHONE_AUDIO_ROW_Y, TOGGLE_ROW_HEIGHT),
+    (EQUALIZER_ROW_Y, TOGGLE_ROW_HEIGHT),
     (DPI_ROW_Y, DPI_ROW_HEIGHT),
     (RESTORE_DPI_ROW_Y, RESTORE_ROW_HEIGHT),
     (ADVANCED_ROW_Y, ADVANCED_ROW_HEIGHT),
@@ -1840,8 +1954,10 @@ fn bitmap_glyph(character: char) -> Option<[u8; 7]> {
         ' ' => [0; 7],
         '.' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x0c],
         ':' => [0x00, 0x0c, 0x0c, 0x00, 0x0c, 0x0c, 0x00],
-        '-' => [0x00, 0x00, 0x00, 0x1f, 0x00, 0x00, 0x00],
+        '-' | '−' => [0x00, 0x00, 0x00, 0x1f, 0x00, 0x00, 0x00],
         '/' => [0x01, 0x02, 0x02, 0x04, 0x08, 0x08, 0x10],
+        '+' => [0x00, 0x04, 0x04, 0x1f, 0x04, 0x04, 0x00],
+        '·' => [0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00],
         '•' => [0x00, 0x04, 0x0e, 0x1f, 0x0e, 0x04, 0x00],
         '‹' => [0x00, 0x02, 0x04, 0x08, 0x04, 0x02, 0x00],
         '›' => [0x00, 0x08, 0x04, 0x02, 0x04, 0x08, 0x00],
@@ -2017,7 +2133,7 @@ mod tests {
         let maximum = stop_at_or_after(&stops, overflow);
         assert!(maximum >= overflow);
         assert_eq!(
-            SETTINGS_ROWS[PHONE_AUDIO_ROW].0 - maximum,
+            SETTINGS_ROWS[EQUALIZER_ROW].0 - maximum,
             FIRST_ROW_Y,
             "at the bottom the first visible row sits where Phones sits at the top"
         );
@@ -2060,7 +2176,10 @@ mod tests {
              ‹ Phones › saved None Connect Disconnect Connected Connecting Forget Confirm \
              No saved phones you connect wirelessly show up here Wireless is off Enable projection \
              to manage Unable save settings Advanced Wi-Fi band Channel width 2.4 GHz 5 MHz \
-             change restarts after close"
+             change restarts after close Equalizer Reset flat Preamp +12.0 dB · Editing \
+             All USB output Music calls navigation assistants Boosts can clip Lower add headroom \
+             unavailable Update device image use bypasses 31.25 62.5 1k 2k 4k 8k 16k \
+             −24 EQ off curve saved USB audio only Turn choose Press adjust finish Release reduce"
                 .chars()
         {
             assert!(

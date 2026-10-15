@@ -1461,6 +1461,7 @@ impl LiveMedia {
                         .map(|stream| (stream.stream_id, stream.format_id))
                         .collect(),
                 );
+                audio_config.equalizer = config.equalizer.clone();
                 audio_config.command_capacity = 64;
                 Some(LinuxAudioBackend::start(audio_config).map_err(|error| {
                     format!("starting Android Auto audio backend failed: {error}")

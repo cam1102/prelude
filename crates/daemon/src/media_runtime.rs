@@ -228,6 +228,7 @@ struct MediaSupervisor {
     video_synchronization: VideoSynchronizationTelemetry,
     display: Option<LinuxDisplayHandle>,
     audio_route: Option<AudioOutputRoute>,
+    equalizer: prelude_media::EqualizerControl,
     audio_output_enabled: bool,
     peer: Option<SocketAddrV6>,
     audio_descriptors: BTreeMap<StreamKey, AudioDescriptor>,
@@ -538,6 +539,7 @@ impl LiveMediaRuntime {
             video_synchronization: video_synchronization.clone(),
             display,
             audio_route,
+            equalizer: config.equalizer.clone(),
             audio_output_enabled: audio_output_available,
             peer: None,
             audio_descriptors: BTreeMap::new(),
@@ -1413,6 +1415,7 @@ impl MediaSupervisor {
             .clone()
             .ok_or_else(|| "audio output is enabled without a route".to_owned())?;
         let mut config = LinuxAudioBackendConfig::with_negotiated_route(base_route, streams);
+        config.equalizer = self.equalizer.clone();
         config.command_capacity = 64;
         config.mix_policy = AudioMixPolicy::carplay();
         let backend = match LinuxAudioBackend::start(config) {

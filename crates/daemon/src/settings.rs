@@ -12,7 +12,7 @@ use thiserror::Error;
 use crate::DaemonConfig;
 
 const SETTINGS_FILE: &str = "settings.toml";
-const MAXIMUM_SETTINGS_BYTES: u64 = 512;
+const MAXIMUM_SETTINGS_BYTES: u64 = 2048;
 
 #[derive(Debug, Error)]
 pub enum SettingsError {
@@ -30,6 +30,8 @@ pub enum SettingsError {
     InvalidWifiChannel(u8),
     #[error("Wi-Fi channel width {0} MHz is not 20, 40, or 80")]
     InvalidWifiWidth(u16),
+    #[error("invalid equalizer settings: {0}")]
+    InvalidEqualizer(#[source] prelude_media::Error),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +44,7 @@ pub struct RuntimeSettings {
     pub original_dpi: u32,
     pub dpi_customized: bool,
     pub phone_audio: bool,
+    pub equalizer: prelude_media::EqualizerSettings,
     pub wifi_channel: Option<u8>,
     pub wifi_channel_width_mhz: Option<u16>,
 }
@@ -55,6 +58,7 @@ impl Default for RuntimeSettings {
             original_dpi: prelude_android_auto_protocol::DEFAULT_VIDEO_DENSITY_DPI,
             dpi_customized: false,
             phone_audio: false,
+            equalizer: Default::default(),
             wifi_channel: None,
             wifi_channel_width_mhz: None,
         }
@@ -75,6 +79,7 @@ impl RuntimeSettings {
             dpi_customized: false,
             phone_audio: config.airplay.disable_audio_output
                 && config.android_auto.disable_audio_output,
+            equalizer: config.media.equalizer.settings(),
             wifi_channel: Some(config.wireless.channel),
             wifi_channel_width_mhz: Some(config.wireless.channel_width_mhz),
         }
@@ -88,6 +93,9 @@ impl RuntimeSettings {
     }
 
     pub fn validate(self) -> Result<Self, SettingsError> {
+        self.equalizer
+            .validate()
+            .map_err(SettingsError::InvalidEqualizer)?;
         if !(prelude_android_auto_protocol::MIN_VIDEO_DENSITY_DPI
             ..=prelude_android_auto_protocol::MAX_VIDEO_DENSITY_DPI)
             .contains(&self.reported_dpi)
@@ -116,6 +124,19 @@ impl RuntimeSettings {
     }
 
     pub fn apply_to_config(self, config: &mut DaemonConfig) -> Result<(), SettingsError> {
+        let settings = self.validate()?;
+        config
+            .media
+            .equalizer
+            .set(settings.equalizer)
+            .map_err(SettingsError::InvalidEqualizer)?;
+        settings.apply_to_config_preserving_equalizer(config)
+    }
+
+    pub fn apply_to_config_preserving_equalizer(
+        self,
+        config: &mut DaemonConfig,
+    ) -> Result<(), SettingsError> {
         let settings = self.validate()?;
         config.platform.ambient_light.automatic_brightness = settings.auto_brightness;
         config.platform.ambient_light.automatic_night_mode = settings.auto_night_mode;
@@ -217,6 +238,11 @@ mod tests {
             original_dpi: 170,
             dpi_customized: true,
             phone_audio: true,
+            equalizer: prelude_media::EqualizerSettings {
+                enabled: true,
+                bands_half_db: [24; 10],
+                preamp_half_db: -48,
+            },
             wifi_channel: Some(149),
             wifi_channel_width_mhz: Some(40),
         };
@@ -233,6 +259,90 @@ mod tests {
                 & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn equalizer_legacy_validation_and_maximum_file_size() {
+        let legacy: RuntimeSettings = toml::from_str("reported_dpi = 200\n").expect("legacy");
+        assert_eq!(
+            legacy.equalizer,
+            prelude_media::EqualizerSettings::default()
+        );
+        let mut settings = RuntimeSettings {
+            reported_dpi: prelude_android_auto_protocol::MAX_VIDEO_DENSITY_DPI,
+            original_dpi: prelude_android_auto_protocol::MAX_VIDEO_DENSITY_DPI,
+            equalizer: prelude_media::EqualizerSettings {
+                enabled: true,
+                bands_half_db: [-24; 10],
+                preamp_half_db: -48,
+            },
+            wifi_channel: Some(149),
+            wifi_channel_width_mhz: Some(80),
+            ..Default::default()
+        };
+        assert!(
+            toml::to_string(&settings).expect("encode").len() < MAXIMUM_SETTINGS_BYTES as usize
+        );
+        settings.equalizer.preamp_half_db = 25;
+        assert!(matches!(
+            settings.validate(),
+            Err(SettingsError::InvalidEqualizer(_))
+        ));
+    }
+
+    #[test]
+    fn disabled_equalizer_roundtrips_the_saved_curve_and_shared_config_keeps_latest() {
+        let directory = TempDir::new().expect("directory");
+        let saved = prelude_media::EqualizerSettings {
+            enabled: false,
+            bands_half_db: [-24, 24, 0, 1, 2, 3, 4, 5, 6, 7],
+            preamp_half_db: -48,
+        };
+        let settings = RuntimeSettings {
+            equalizer: saved,
+            ..Default::default()
+        };
+        settings.persist(directory.path()).expect("save");
+        let loaded = RuntimeSettings::load(directory.path(), Default::default()).expect("load");
+        assert_eq!(loaded.equalizer, saved);
+        let mut config = DaemonConfig::default();
+        let before_session = config.media.clone();
+        loaded.apply_to_config(&mut config).expect("apply");
+        assert_eq!(before_session.equalizer.settings(), saved);
+        let mut next = loaded;
+        next.equalizer.enabled = true;
+        next.apply_to_config(&mut config).expect("rebuild");
+        assert!(before_session.equalizer.settings().enabled);
+        assert_eq!(
+            config.media.clone().equalizer.settings().bands_half_db,
+            saved.bands_half_db
+        );
+    }
+
+    #[test]
+    fn stale_restart_snapshot_does_not_revert_a_later_live_equalizer_edit() {
+        let mut config = DaemonConfig::default();
+        let snapshot = RuntimeSettings {
+            phone_audio: true,
+            ..Default::default()
+        };
+        let latest = prelude_media::EqualizerSettings {
+            enabled: true,
+            bands_half_db: [7; 10],
+            preamp_half_db: -20,
+        };
+        let existing_session = config.media.clone();
+        config
+            .media
+            .equalizer
+            .set(latest)
+            .expect("live edit after event queued");
+        snapshot
+            .apply_to_config_preserving_equalizer(&mut config)
+            .expect("runtime rebuild");
+        assert!(config.airplay.disable_audio_output);
+        assert_eq!(config.media.equalizer.settings(), latest);
+        assert_eq!(existing_session.equalizer.settings(), latest);
     }
 
     #[test]

@@ -169,6 +169,7 @@ async fn main() -> Result<()> {
             display_runtime.handle(),
             daemon.config().state_dir.clone(),
             runtime_settings,
+            daemon.config().media.equalizer.clone(),
             ambient_control.clone(),
             wireless.as_ref().map(WirelessService::directory),
         )
@@ -263,7 +264,10 @@ async fn main() -> Result<()> {
                 continue;
             }
             let mut candidate_config = settings_base_config.clone();
-            if let Err(error) = event.settings.apply_to_config(&mut candidate_config) {
+            if let Err(error) = event
+                .settings
+                .apply_to_config_preserving_equalizer(&mut candidate_config)
+            {
                 warn!(%error, "host settings could not be applied");
                 continue;
             }
