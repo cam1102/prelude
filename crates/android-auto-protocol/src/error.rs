@@ -2,7 +2,7 @@ use std::io;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("Android Auto transport I/O failed")]
+    #[error("Android Auto transport I/O failed: {0}")]
     Io(#[source] io::Error),
     #[error("invalid Android Auto frame: {0}")]
     InvalidFrame(&'static str),

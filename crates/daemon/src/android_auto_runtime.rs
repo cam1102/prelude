@@ -59,6 +59,8 @@ use prelude_media::{
     VideoSynchronizationTelemetry, VideoSynchronizationTelemetrySnapshot,
 };
 
+#[cfg(all(target_os = "linux", feature = "linux-media"))]
+use crate::first_video::{FirstVideoAction, FirstVideoWatchdog};
 use crate::{
     AndroidAutoConfig, AudioBackend, AudioPipelineState, AudioRuntimeRoute, AudioRuntimeSnapshot,
     DaemonConfig, DisplayPlatform, DisplayStatus, Error, HealthState, MediaConfig,
@@ -948,8 +950,11 @@ fn is_missing_audio_output(detail: &str) -> bool {
 }
 
 fn set_stage(progress: &SharedProgress, stage: WorkerStage) {
-    if let Ok(mut progress) = progress.lock() {
+    if let Ok(mut progress) = progress.lock()
+        && progress.stage != stage
+    {
         progress.stage = stage;
+        tracing::info!(?stage, "Android Auto worker stage");
     }
 }
 
@@ -2325,6 +2330,7 @@ fn run_protocol<T: std::io::Read + std::io::Write + Send>(
     let mut shutdown_started = false;
     let mut pending_voice_session = None;
     let mut pending_microphone = None;
+    let mut first_video = None;
     let session_result = (|| {
         while session.is_alive() {
             if shutdown.is_requested() && !shutdown_started {
@@ -2384,6 +2390,7 @@ fn run_protocol<T: std::io::Read + std::io::Write + Send>(
                                     )?;
                             }
                             set_stage(progress, WorkerStage::Running);
+                            first_video = Some(FirstVideoWatchdog::new(Instant::now()));
                         }
                     }
                     Event::Disconnected { reason } => {
@@ -2418,6 +2425,38 @@ fn run_protocol<T: std::io::Read + std::io::Write + Send>(
                 && session.state() == SessionState::Running
             {
                 media.poll(&mut session, controls)?;
+                if progress
+                    .lock()
+                    .is_ok_and(|progress| progress.video_frames > 0)
+                {
+                    first_video = None;
+                }
+                if let Some(watchdog) = first_video.as_mut() {
+                    match watchdog.check(Instant::now()) {
+                        FirstVideoAction::Wait => {}
+                        FirstVideoAction::RequestKeyFrame => {
+                            tracing::warn!(
+                                "Android Auto phone has sent no video since connecting; requesting a keyframe"
+                            );
+                            session.send(Command::RequestKeyFrame).map_err(|error| {
+                                format!("requesting first Android Auto keyframe failed: {error}")
+                            })?;
+                            update_progress(progress, |progress| {
+                                progress.keyframe_requests =
+                                    progress.keyframe_requests.saturating_add(1);
+                            });
+                        }
+                        FirstVideoAction::Expired => {
+                            tracing::warn!(
+                                "Android Auto phone sent no video after connecting; restarting the session"
+                            );
+                            return Err(format!(
+                                "Android Auto phone sent no video within {:?} of connecting",
+                                FirstVideoWatchdog::TIMEOUT
+                            ));
+                        }
+                    }
+                }
             }
             let desired_night_mode = ambient_light.night_mode();
             if session

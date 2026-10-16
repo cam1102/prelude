@@ -154,6 +154,7 @@ fn retained_media_progress_after_session(progress: MediaProgress) -> MediaProgre
 pub(crate) struct MediaController {
     commands: SyncSender<MediaCommand>,
     feedback_clock: Arc<FeedbackClock>,
+    screen_frames: Arc<AtomicU64>,
     #[cfg(test)]
     mute_toggle_attempts: Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
@@ -244,6 +245,7 @@ struct MediaSupervisor {
     ducked: bool,
     ducked_main_gain: Option<f64>,
     feedback_clock: Arc<FeedbackClock>,
+    screen_frames: Arc<AtomicU64>,
     recording_requested: bool,
     flush_state: Arc<Mutex<AudioFlushState>>,
     audio_stream_latencies: Arc<Mutex<Vec<AudioStreamLatencyStatus>>>,
@@ -529,6 +531,7 @@ impl LiveMediaRuntime {
         let audio_stream_latencies = Arc::new(Mutex::new(Vec::new()));
         let video_synchronization = VideoSynchronizationTelemetry::new(video.output_delay);
         let feedback_clock = Arc::new(FeedbackClock::new());
+        let screen_frames = Arc::new(AtomicU64::new(0));
         let flush_state = Arc::new(Mutex::new(AudioFlushState::default()));
         let supervisor = MediaSupervisor {
             commands: commands_rx,
@@ -555,6 +558,7 @@ impl LiveMediaRuntime {
             ducked: false,
             ducked_main_gain: None,
             feedback_clock: Arc::clone(&feedback_clock),
+            screen_frames: Arc::clone(&screen_frames),
             recording_requested: false,
             flush_state,
             audio_stream_latencies: Arc::clone(&audio_stream_latencies),
@@ -567,6 +571,7 @@ impl LiveMediaRuntime {
             controller: MediaController {
                 commands: commands_tx,
                 feedback_clock,
+                screen_frames,
                 #[cfg(test)]
                 mute_toggle_attempts: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 #[cfg(test)]
@@ -874,6 +879,7 @@ impl MediaController {
         Self {
             commands,
             feedback_clock: Arc::new(FeedbackClock::new()),
+            screen_frames: Arc::new(AtomicU64::new(0)),
             mute_toggle_attempts: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             ducking_events,
         }
@@ -881,6 +887,10 @@ impl MediaController {
 
     pub(crate) fn audio_feedback(&self) -> Result<Vec<AudioFeedbackStream>, String> {
         self.feedback_clock.snapshot()
+    }
+
+    pub(crate) fn screen_frames_received(&self) -> u64 {
+        self.screen_frames.load(Ordering::Acquire)
     }
 
     pub(crate) fn set_peer(&self, peer: SocketAddrV6) -> Result<(), String> {
@@ -1186,6 +1196,7 @@ impl MediaSupervisor {
         let video = self.video;
         let video_synchronization = self.video_synchronization.clone();
         let display = self.display.clone();
+        let screen_frames = Arc::clone(&self.screen_frames);
         let audio = Arc::clone(&self.audio);
         let progress = Arc::clone(&self.progress);
         let event_commands = self.event_commands.clone();
@@ -1265,6 +1276,7 @@ impl MediaSupervisor {
                             event_commands,
                             video_synchronization,
                             display,
+                            screen_frames,
                         });
                         if let Err(error) = &result {
                             tracing::warn!(error, "screen media worker stopped");
@@ -1785,6 +1797,7 @@ struct ScreenWorkerContext {
     event_commands: SyncSender<EventWorkerCommand>,
     video_synchronization: VideoSynchronizationTelemetry,
     display: Option<LinuxDisplayHandle>,
+    screen_frames: Arc<AtomicU64>,
 }
 
 fn screen_worker(context: ScreenWorkerContext) -> Result<(), String> {
@@ -1798,6 +1811,7 @@ fn screen_worker(context: ScreenWorkerContext) -> Result<(), String> {
         event_commands,
         video_synchronization,
         display,
+        screen_frames,
     } = context;
     listener
         .set_nonblocking(true)
@@ -1879,6 +1893,7 @@ fn screen_worker(context: ScreenWorkerContext) -> Result<(), String> {
                 }
                 ScreenWireEvent::Frame(frame) => {
                     frame_ordinal = frame_ordinal.saturating_add(1);
+                    screen_frames.fetch_add(1, Ordering::AcqRel);
                     let idr = frame
                         .nal_units
                         .iter()

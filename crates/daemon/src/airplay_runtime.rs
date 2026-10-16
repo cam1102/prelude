@@ -44,6 +44,7 @@ use crate::shared_mfi::SharedMfi;
 use crate::{
     AirPlayConfig, AudioRuntimeSnapshot, Iap2Config, MediaConfig, PlatformConfig,
     airplay_data_channel::{DataChannels, Iap2Tunnel, SharedIap2Tunnel},
+    first_video::{FirstVideoAction, FirstVideoWatchdog},
     iap2_runtime::ReceiverStartMetadata,
 };
 
@@ -71,6 +72,10 @@ impl MediaController {
 
     fn audio_feedback(&self) -> Result<Vec<prelude_net::AudioFeedbackStream>, String> {
         Ok(Vec::new())
+    }
+
+    fn screen_frames_received(&self) -> u64 {
+        0
     }
 
     fn set_peer(&self, _peer: SocketAddrV6) -> Result<(), String> {
@@ -155,6 +160,7 @@ const CARPLAY_SOURCE_VERSION: &str = "320.17";
 const MAXIMUM_PENDING_EVENT_RESPONSES: usize = 256;
 const RECORD_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const PEER_SILENCE_TIMEOUT: Duration = Duration::from_secs(15);
+const CONTROL_SETUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) enum EventWorkerCommand {
     SetNightMode {
@@ -1212,6 +1218,9 @@ fn run_control_connection<S: MfiSigner, W: Read + Write>(
     let mut control_prefix = Vec::with_capacity(32);
     let mut peer_heard = Instant::now();
     let mut keep_alive_armed = false;
+    let connected_at = Instant::now();
+    let mut recording_reached = false;
+    let mut first_video = None;
     loop {
         if cancellation.is_cancelled() {
             return Ok(());
@@ -1222,6 +1231,17 @@ fn run_control_connection<S: MfiSigner, W: Read + Write>(
         }
         if keep_alive_armed && peer_heard.elapsed() >= PEER_SILENCE_TIMEOUT {
             return Err("the AirPlay peer stopped sending keep-alives".to_owned());
+        }
+        if !recording_reached && connected_at.elapsed() >= CONTROL_SETUP_TIMEOUT {
+            tracing::warn!(
+                "CarPlay did not start streaming after connecting; restarting the session"
+            );
+            return Err(format!(
+                "CarPlay did not start streaming within {CONTROL_SETUP_TIMEOUT:?} of connecting"
+            ));
+        }
+        if let Some(media) = media {
+            check_first_screen_frame(&mut first_video, media, event_command_sender)?;
         }
         let read_buffer = if cipher.is_some() {
             &mut input[..]
@@ -1322,6 +1342,19 @@ fn run_control_connection<S: MfiSigner, W: Read + Write>(
                 &mut data_channels,
                 progress,
             )?;
+            if !recording_reached
+                && progress
+                    .lock()
+                    .is_ok_and(|progress| progress.stage == AirPlayStage::Recording)
+            {
+                recording_reached = true;
+                first_video = media.map(|media| {
+                    (
+                        FirstVideoWatchdog::new(Instant::now()),
+                        media.screen_frames_received(),
+                    )
+                });
+            }
             if output
                 .events
                 .iter()
@@ -1340,6 +1373,45 @@ fn run_control_connection<S: MfiSigner, W: Read + Write>(
             if matches!(receiver.state(), ReceiverState::Teardown) {
                 return Ok(());
             }
+        }
+    }
+}
+
+fn check_first_screen_frame(
+    first_video: &mut Option<(FirstVideoWatchdog, u64)>,
+    media: &MediaController,
+    event_command_sender: &mpsc::SyncSender<EventWorkerCommand>,
+) -> Result<(), String> {
+    if first_video
+        .as_ref()
+        .is_some_and(|(_, baseline)| media.screen_frames_received() > *baseline)
+    {
+        *first_video = None;
+    }
+    let Some((watchdog, _)) = first_video.as_mut() else {
+        return Ok(());
+    };
+    match watchdog.check(Instant::now()) {
+        FirstVideoAction::Wait => Ok(()),
+        FirstVideoAction::RequestKeyFrame => {
+            tracing::warn!(
+                "CarPlay has sent no screen video since recording started; requesting a keyframe"
+            );
+            match event_command_sender.try_send(EventWorkerCommand::ForceKeyFrame) {
+                Ok(()) | Err(mpsc::TrySendError::Full(_)) => Ok(()),
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    Err("queueing CarPlay keyframe request failed: event worker stopped".to_owned())
+                }
+            }
+        }
+        FirstVideoAction::Expired => {
+            tracing::warn!(
+                "CarPlay sent no screen video after recording started; restarting the session"
+            );
+            Err(format!(
+                "CarPlay sent no screen video within {:?} of recording",
+                FirstVideoWatchdog::TIMEOUT
+            ))
         }
     }
 }
@@ -3719,6 +3791,42 @@ mod tests {
         let response = String::from_utf8(io.written).expect("ASCII response");
         assert!(response.starts_with("RTSP/1.0 200 OK\r\n"));
         assert!(response.contains("cseq: 1\r\n"));
+    }
+
+    #[test]
+    fn missing_first_screen_frame_requests_a_keyframe_then_fails_the_session() {
+        let media = MediaController::responding_for_test();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let started = |ago: Duration| {
+            Instant::now()
+                .checked_sub(ago)
+                .expect("monotonic clock has enough history")
+        };
+
+        let mut first_video = Some((
+            FirstVideoWatchdog::new(started(Duration::from_secs(1))),
+            media.screen_frames_received(),
+        ));
+        check_first_screen_frame(&mut first_video, &media, &sender).expect("still waiting");
+        assert!(receiver.try_recv().is_err());
+
+        let mut first_video = Some((
+            FirstVideoWatchdog::new(started(FirstVideoWatchdog::KEYFRAME_AFTER)),
+            media.screen_frames_received(),
+        ));
+        check_first_screen_frame(&mut first_video, &media, &sender).expect("keyframe request");
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(EventWorkerCommand::ForceKeyFrame)
+        ));
+
+        let mut first_video = Some((
+            FirstVideoWatchdog::new(started(FirstVideoWatchdog::TIMEOUT)),
+            media.screen_frames_received(),
+        ));
+        let error = check_first_screen_frame(&mut first_video, &media, &sender)
+            .expect_err("the stalled session fails");
+        assert!(error.contains("no screen video"));
     }
 
     #[test]

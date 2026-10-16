@@ -11,6 +11,7 @@ mod device_discovery;
 mod diagnostics;
 mod display_state;
 mod error;
+mod first_video;
 mod health;
 mod heartbeat;
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
