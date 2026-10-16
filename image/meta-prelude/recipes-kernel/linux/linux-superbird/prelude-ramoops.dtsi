@@ -1,0 +1,18 @@
+/ {
+	reserved-memory {
+		/* Amlogic's stock G12A layout: 1 MiB directly above the BL32
+		 * carveout (0x05300000-0x07300000), untouched by BL2, U-Boot,
+		 * and the kernel/FDT load addresses, so contents survive a warm
+		 * reset. 256 KiB holds the previous boot's console; the rest
+		 * fits six 128 KiB crash dumps. */
+		ramoops@7400000 {
+			compatible = "ramoops";
+			reg = <0x0 0x07400000 0x0 0x100000>;
+			no-map;
+			record-size = <0x20000>;
+			console-size = <0x40000>;
+			pmsg-size = <0x0>;
+			ftrace-size = <0x0>;
+		};
+	};
+};
