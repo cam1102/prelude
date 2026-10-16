@@ -1,5 +1,3 @@
-#[cfg(all(target_os = "linux", feature = "linux-media"))]
-use std::fs;
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -13,8 +11,8 @@ use preluded::{
 };
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
 use preluded::{
-    DisplayPlatform, Error, HostUi, HostUiEvent, RuntimeSettings, WirelessPhoneDirectory,
-    load_last_display_platform,
+    DisplayPlatform, DisplayStatus, Error, HostUi, HostUiEvent, RuntimeSettings,
+    WirelessPhoneDirectory, load_last_display_platform, render_status_screen,
 };
 use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -38,6 +36,14 @@ async fn main() -> Result<()> {
         .with_target(false)
         .init();
     let arguments = Arguments::parse();
+    #[cfg(all(target_os = "linux", feature = "linux-media"))]
+    if !arguments.diagnose
+        && let Err(error) = std::thread::Builder::new()
+            .name("prelude-fonts".to_owned())
+            .spawn(preluded::prepare_status_screens)
+    {
+        warn!(%error, "preloading fonts failed; status screens load them on first use");
+    }
     #[cfg(all(target_os = "linux", feature = "linux-media"))]
     let mut config = arguments
         .config
@@ -94,13 +100,12 @@ async fn main() -> Result<()> {
         None
     } else {
         let startup_platform = load_last_display_platform(&config.state_dir);
-        let startup_overlay = fs::read(
-            startup_platform
-                .unwrap_or(DisplayPlatform::CarPlay)
-                .overlay_path(),
+        let startup_overlay = render_status_screen(
+            startup_platform.unwrap_or(DisplayPlatform::CarPlay),
+            DisplayStatus::WaitingForPhone,
         )
         .map_err(|error| {
-            preluded::Error::Runtime(format!("reading the startup overlay failed: {error}"))
+            preluded::Error::Runtime(format!("rendering the startup screen failed: {error}"))
         })?;
         let display_runtime =
             prelude_media::LinuxDisplayRuntime::start_with_overlay(startup_overlay.clone())
@@ -108,12 +113,13 @@ async fn main() -> Result<()> {
                     preluded::Error::Runtime(format!("starting the local display failed: {error}"))
                 })?;
         if startup_platform.is_none() {
-            let android_auto_overlay = fs::read(DisplayPlatform::AndroidAuto.overlay_path())
-                .map_err(|error| {
-                    preluded::Error::Runtime(format!(
-                        "reading the Android Auto startup overlay failed: {error}"
-                    ))
-                })?;
+            let android_auto_overlay =
+                render_status_screen(DisplayPlatform::AndroidAuto, DisplayStatus::WaitingForPhone)
+                    .map_err(|error| {
+                        preluded::Error::Runtime(format!(
+                            "rendering the Android Auto startup screen failed: {error}"
+                        ))
+                    })?;
             display_runtime
                 .handle()
                 .start_waiting_overlay_cycle(

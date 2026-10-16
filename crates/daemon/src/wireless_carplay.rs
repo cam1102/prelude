@@ -33,7 +33,7 @@ use crate::{
 };
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
 use crate::{
-    DisplayPlatform, DisplayStatus, persist_last_display_platform,
+    ConnectionStep, DisplayPlatform, DisplayStatus, persist_last_display_platform,
     wired_runtime::apply_carplay_display_status,
 };
 #[cfg(target_os = "linux")]
@@ -111,6 +111,27 @@ struct Progress {
     airplay: Option<(AirPlayProgress, bool)>,
     audio_output_missing: bool,
     audio: AudioRuntimeSnapshot,
+}
+
+#[cfg(all(target_os = "linux", feature = "linux-media"))]
+impl Progress {
+    fn display_status(&self) -> DisplayStatus {
+        let step = match self.stage {
+            Stage::WaitingForAccessPoint => ConnectionStep::StartingWifi,
+            Stage::OpeningMfi => ConnectionStep::PreparingAuthentication,
+            Stage::BindingAirplay => ConnectionStep::StartingReceiver,
+            Stage::Setup => ConnectionStep::Authenticating,
+            Stage::Availability => ConnectionStep::WaitingForCarPlay,
+            Stage::Start => ConnectionStep::StartingCarPlay,
+            Stage::Active => {
+                return self
+                    .airplay
+                    .map_or(AirPlayStage::Listening, |(airplay, _)| airplay.stage)
+                    .display_status(ConnectionStep::WaitingForIphoneOnWifi);
+            }
+        };
+        DisplayStatus::Connecting(Some(step))
+    }
 }
 
 impl Default for Progress {
@@ -252,10 +273,8 @@ impl WirelessCarPlayRuntime {
             |progress| {
                 if progress.audio_output_missing {
                     DisplayStatus::MissingAudioOutput
-                } else if progress.stage == Stage::Active {
-                    DisplayStatus::Connected
                 } else {
-                    DisplayStatus::Connecting
+                    progress.display_status()
                 }
             },
         );

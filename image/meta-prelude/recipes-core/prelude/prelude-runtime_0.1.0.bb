@@ -22,15 +22,8 @@ SRC_URI += " \
     file://prelude-dev.tmpfiles.conf \
     file://config.toml \
     file://config-dev.toml \
-    file://carplay.nv12 \
-    file://carplay-unlock-phone.nv12 \
-    file://carplay-connecting.nv12 \
-    file://carplay-connected.nv12 \
-    file://carplay-missing-audio.nv12 \
-    file://android-auto.nv12 \
-    file://android-auto-connecting.nv12 \
-    file://android-auto-connected.nv12 \
-    file://android-auto-missing-audio.nv12 \
+    file://carplay-logo.nv12 \
+    file://android-auto-logo.nv12 \
 "
 # ISO 3166-1 alpha-2 code for the access point's regulatory domain.
 PRELUDE_WIRELESS_COUNTRY ??= "US"
@@ -97,76 +90,24 @@ do_install() {
     install -m 0644 ${UNPACKDIR}/config.toml ${D}${sysconfdir}/prelude/config.toml
     install -m 0644 ${UNPACKDIR}/config-dev.toml ${D}${sysconfdir}/prelude/config-dev.toml
 
-    for overlay in \
-        carplay.nv12 \
-        carplay-unlock-phone.nv12 \
-        carplay-connecting.nv12 \
-        carplay-connected.nv12 \
-        carplay-missing-audio.nv12 \
-        android-auto.nv12 \
-        android-auto-connecting.nv12 \
-        android-auto-connected.nv12 \
-        android-auto-missing-audio.nv12; do
+    # Status text is drawn by preluded at runtime; these frames only carry the
+    # logos. Pin their hashes so a partial or mismatched update cannot ship.
+    install -d ${D}${datadir}/prelude
+    for overlay in carplay-logo.nv12 android-auto-logo.nv12; do
         if [ "$(wc -c < ${UNPACKDIR}/$overlay)" -ne 576000 ]; then
             bbfatal "$overlay is not an 800x480 NV12 frame"
         fi
-    done
-    # The supplied icon frames are rasterized with Inter Regular at 20px; pin
-    # their hashes so a partial or mismatched splash update cannot ship.
-    for overlay in \
-        carplay.nv12 \
-        carplay-unlock-phone.nv12 \
-        carplay-connecting.nv12 \
-        carplay-connected.nv12 \
-        carplay-missing-audio.nv12 \
-        android-auto.nv12 \
-        android-auto-connecting.nv12 \
-        android-auto-connected.nv12 \
-        android-auto-missing-audio.nv12; do
         case "$overlay" in
-            carplay.nv12)
-                expected="a1a5f41a60fd909163ebbde83921b80d2f1f3f6c6703f97fad937ef3225ed055"
+            carplay-logo.nv12)
+                expected="036c4d51198eaf0fbb2fd13c3d3b6cfab1eaff5b44ecf8c5d17ea5267075b124"
                 ;;
-            carplay-unlock-phone.nv12)
-                expected="357b9611a1618d5f6682a3896672fa5822219e66456e8c62631928a4e361204e"
-                ;;
-            carplay-connecting.nv12)
-                expected="2068c2f77a706e5082125f4881a88070db81e99be43297bdffb76181d97442b2"
-                ;;
-            carplay-connected.nv12)
-                expected="14bad31f686da1c4a5f00a741de6cfbca4d2edfc2e830e969e4d23b8eff4d24c"
-                ;;
-            carplay-missing-audio.nv12)
-                expected="114937189a8cab25acb9eefd861e2d107951a57eabd69ebe28b63fde113e3796"
-                ;;
-            android-auto.nv12)
-                expected="e2940971db3c0eaed42f844963f91d5056e9dc3e2b900df5603f25c2333c56e5"
-                ;;
-            android-auto-connecting.nv12)
-                expected="a4988d1235bb922f374dc3b81257a5af518cf8a68853c6f206dc029207827a40"
-                ;;
-            android-auto-connected.nv12)
-                expected="e6daf507c1872844299e70554d153821788c6c34ea24614024585949a4740824"
-                ;;
-            android-auto-missing-audio.nv12)
-                expected="5b27408cf3afa2f9d3f3e6fdb06ac5b278314af31b581d83f3cf0457287b7a9d"
+            android-auto-logo.nv12)
+                expected="5c658f778f8265a02913e6c77d684d542fe95951225f33e53019f3ae3ae3fb52"
                 ;;
         esac
         if [ "$(sha256sum ${UNPACKDIR}/$overlay | cut -d' ' -f1)" != "$expected" ]; then
-            bbfatal "$overlay does not match the supplied splash frame"
+            bbfatal "$overlay does not match the supplied logo frame"
         fi
-    done
-    install -d ${D}${datadir}/prelude
-    for overlay in \
-        carplay.nv12 \
-        carplay-unlock-phone.nv12 \
-        carplay-connecting.nv12 \
-        carplay-connected.nv12 \
-        carplay-missing-audio.nv12 \
-        android-auto.nv12 \
-        android-auto-connecting.nv12 \
-        android-auto-connected.nv12 \
-        android-auto-missing-audio.nv12; do
         install -m 0644 ${UNPACKDIR}/$overlay ${D}${datadir}/prelude/$overlay
     done
 

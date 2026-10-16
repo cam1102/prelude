@@ -189,6 +189,28 @@ pub(crate) enum AirPlayStage {
     Stopped,
 }
 
+#[cfg(any(test, all(target_os = "linux", feature = "linux-media")))]
+impl AirPlayStage {
+    pub(crate) const fn display_status(
+        self,
+        listening: crate::ConnectionStep,
+    ) -> crate::DisplayStatus {
+        use crate::{ConnectionStep, DisplayStatus};
+
+        let step = match self {
+            Self::Listening => listening,
+            Self::Connected => ConnectionStep::VerifyingPairing,
+            Self::EncryptedControl => ConnectionStep::Authenticating,
+            Self::MfiAuthenticated => ConnectionStep::SettingUpSession,
+            Self::SessionConfigured => ConnectionStep::SettingUpStreams,
+            Self::StreamsConfigured => ConnectionStep::StartingStream,
+            Self::Recording => return DisplayStatus::Connected,
+            Self::Failed | Self::Stopped => return DisplayStatus::Connecting(None),
+        };
+        DisplayStatus::Connecting(Some(step))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AirPlayProgress {
     pub stage: AirPlayStage,
@@ -2861,6 +2883,33 @@ mod tests {
             )
             .expect("phone cipher"),
         )
+    }
+
+    #[test]
+    fn display_status_tracks_the_receiver_until_recording() {
+        use crate::{ConnectionStep, DisplayStatus};
+
+        let wifi = ConnectionStep::WaitingForIphoneOnWifi;
+        assert_eq!(
+            AirPlayStage::Listening.display_status(wifi),
+            DisplayStatus::Connecting(Some(wifi))
+        );
+        assert_eq!(
+            AirPlayStage::Connected.display_status(wifi),
+            DisplayStatus::Connecting(Some(ConnectionStep::VerifyingPairing))
+        );
+        assert_eq!(
+            AirPlayStage::StreamsConfigured.display_status(wifi),
+            DisplayStatus::Connecting(Some(ConnectionStep::StartingStream))
+        );
+        assert_eq!(
+            AirPlayStage::Recording.display_status(wifi),
+            DisplayStatus::Connected
+        );
+        assert_eq!(
+            AirPlayStage::Failed.display_status(wifi),
+            DisplayStatus::Connecting(None)
+        );
     }
 
     #[test]

@@ -12,6 +12,8 @@ mod diagnostics;
 mod display_state;
 mod error;
 mod first_video;
+#[cfg(any(test, all(target_os = "linux", feature = "linux-media")))]
+mod fonts;
 mod health;
 mod heartbeat;
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
@@ -23,6 +25,8 @@ mod media_runtime;
 mod settings;
 #[cfg(target_os = "linux")]
 mod shared_mfi;
+#[cfg(any(test, all(target_os = "linux", feature = "linux-media")))]
+mod status_screen;
 mod wired_runtime;
 mod wireless_carplay;
 mod wireless_runtime;
@@ -45,7 +49,8 @@ pub use daemon::{Daemon, ProjectionRuntime, RuntimeProbe, UnsupportedProjectionR
 pub use device_discovery::{CombinedDeviceDiscovery, ProjectionDevice, ProjectionDeviceDiscovery};
 pub use diagnostics::{DiagnosticEvent, DiagnosticSnapshot, Diagnostics};
 pub use display_state::{
-    DisplayPlatform, DisplayStatus, load_last_display_platform, persist_last_display_platform,
+    ConnectionStep, DisplayPlatform, DisplayStatus, load_last_display_platform,
+    persist_last_display_platform,
 };
 pub use error::{Error, Result};
 pub use health::{ComponentHealth, HealthRegistry, HealthState, OverallHealth};
@@ -54,6 +59,7 @@ pub use heartbeat::HeartbeatWriter;
 pub use host_ui::{HostUi, HostUiEvent, SettingsCommitted};
 pub use known_phones::{KnownPhone, MAXIMUM_KNOWN_PHONES};
 pub use settings::{RuntimeSettings, SettingsError};
+
 pub use wired_runtime::{
     DEFAULT_MAX_WORKER_STOP_WAIT, MAX_IAP2_BLOCKING_STAGE, SelectedRuntime, WiredCarkitRuntime,
     configured_worker_stop_bound,
@@ -73,4 +79,17 @@ pub fn preflight_configured_audio_output(config: &DaemonConfig) -> Result<()> {
         !config.airplay.disable_audio_output,
     )
     .map_err(Error::Runtime)
+}
+
+#[cfg(all(target_os = "linux", feature = "linux-media"))]
+pub fn prepare_status_screens() {
+    let _ = fonts::shared();
+}
+
+#[cfg(all(target_os = "linux", feature = "linux-media"))]
+pub fn render_status_screen(
+    platform: DisplayPlatform,
+    status: DisplayStatus,
+) -> std::result::Result<Vec<u8>, String> {
+    status_screen::render(platform, status)
 }

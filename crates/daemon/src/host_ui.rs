@@ -1,6 +1,5 @@
 use std::{
     fs,
-    os::unix::fs::FileTypeExt,
     path::PathBuf,
     sync::{
         Arc,
@@ -11,7 +10,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use fontdue::{Font, FontSettings};
 use platform_superbird::{
     AmbientLightControl, KnobInputButton, LinuxInputBackend, LinuxInputConfig, PlatformInputEvent,
     PlatformInputEventKind, RotaryDirection, TouchInputPhase,
@@ -21,14 +19,16 @@ use prelude_wireless::access_point::{Band, ChannelWidth};
 use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 
-use crate::{KnownPhone, RuntimeSettings, WirelessPhoneDirectory};
+use crate::{
+    KnownPhone, RuntimeSettings, WirelessPhoneDirectory,
+    fonts::{self, FontSet},
+};
 
 mod equalizer_ui;
 use equalizer_ui::EqualizerUi;
 
 const DISPLAY_WIDTH: usize = 800;
 const DISPLAY_HEIGHT: usize = 480;
-const MAXIMUM_FONT_BYTES: u64 = 8 * 1024 * 1024;
 const SETTINGS_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const INPUT_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const PHONES_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
@@ -450,7 +450,7 @@ struct SettingsUi<D> {
     phones_refreshed: Instant,
     events: Sender<HostUiEvent>,
     wake: Arc<Notify>,
-    fonts: FontSet,
+    fonts: &'static FontSet,
 }
 
 impl<D: OverlaySurface> SettingsUi<D> {
@@ -500,7 +500,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
             phones_refreshed: Instant::now(),
             events,
             wake,
-            fonts: FontSet::load(),
+            fonts: fonts::shared(),
         }
     }
 
@@ -1149,7 +1149,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
         match self.page {
             Page::Equalizer => self.equalizer_ui.render(
                 canvas,
-                &self.fonts,
+                self.fonts,
                 self.staged_phone_audio,
                 self.equalizer_control.availability(),
                 self.error_message,
@@ -1195,7 +1195,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
         };
         if self.page == Page::Settings {
             canvas.text(
-                &self.fonts,
+                self.fonts,
                 self.title(),
                 TITLE_X,
                 TITLE_Y,
@@ -1216,7 +1216,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
                 .fonts
                 .fit(self.title(), TITLE_SIZE, true, right - BACK_TITLE_X);
             canvas.text(
-                &self.fonts,
+                self.fonts,
                 &title,
                 BACK_TITLE_X,
                 TITLE_Y,
@@ -1226,10 +1226,10 @@ impl<D: OverlaySurface> SettingsUi<D> {
             );
         }
         if self.page == Page::Equalizer {
-            self.equalizer_ui.render_header(canvas, &self.fonts);
+            self.equalizer_ui.render_header(canvas, self.fonts);
         } else if let Some((note, color)) = note {
             canvas.text_right(
-                &self.fonts,
+                self.fonts,
                 note,
                 CONTENT_RIGHT,
                 TITLE_Y,
@@ -1272,7 +1272,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
         let center_x = DISPLAY_WIDTH as i32 / 2;
         let center_y = (HEADER_HEIGHT + DISPLAY_HEIGHT as i32) / 2 - 12;
         canvas.text_center(
-            &self.fonts,
+            self.fonts,
             headline,
             center_x,
             center_y - 18,
@@ -1281,7 +1281,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
             true,
         );
         canvas.text_center(
-            &self.fonts,
+            self.fonts,
             caption,
             center_x,
             center_y + 20,
@@ -1305,7 +1305,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
         }
         for (caption, y) in &layout.captions {
             canvas.text(
-                &self.fonts,
+                self.fonts,
                 caption,
                 CONTENT_X,
                 *y,
@@ -1316,7 +1316,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
         }
         for &(footer, y) in &layout.footers {
             canvas.text(
-                &self.fonts,
+                self.fonts,
                 footer,
                 CONTENT_X,
                 y,
@@ -1383,15 +1383,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
                 }
                 if !value.is_empty() {
                     let value = self.fonts.fit(value, VALUE_SIZE, false, 360);
-                    canvas.text_right(
-                        &self.fonts,
-                        &value,
-                        right,
-                        center,
-                        VALUE_SIZE,
-                        *color,
-                        false,
-                    );
+                    canvas.text_right(self.fonts, &value, right, center, VALUE_SIZE, *color, false);
                     right -= self.fonts.text_width(&value, VALUE_SIZE, false) + CONTROL_GAP;
                 }
             }
@@ -1405,7 +1397,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
             center
         };
         canvas.text(
-            &self.fonts,
+            self.fonts,
             &label,
             CONTENT_X,
             label_y,
@@ -1418,7 +1410,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
                 .fonts
                 .fit(detail, DETAIL_SIZE, false, right - CONTENT_X);
             canvas.text(
-                &self.fonts,
+                self.fonts,
                 &detail,
                 CONTENT_X,
                 center + 20,
@@ -1433,16 +1425,10 @@ impl<D: OverlaySurface> SettingsUi<D> {
         let active = focused && (self.editing || self.touch.is_some_and(|touch| touch.sliding));
         let label_y = row.top + 42;
         canvas.text(
-            &self.fonts,
-            "Density",
-            CONTENT_X,
-            label_y,
-            LABEL_SIZE,
-            WHITE,
-            false,
+            self.fonts, "Density", CONTENT_X, label_y, LABEL_SIZE, WHITE, false,
         );
         canvas.text_right(
-            &self.fonts,
+            self.fonts,
             &format!("{} dpi", self.staged_dpi),
             CONTENT_RIGHT,
             label_y,
@@ -1467,7 +1453,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
         canvas.circle(x, track_y, 16, WHITE, 255);
         let caption_y = row.top + 116;
         canvas.text(
-            &self.fonts,
+            self.fonts,
             "Smaller",
             CONTENT_X,
             caption_y,
@@ -1476,7 +1462,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
             false,
         );
         canvas.text_right(
-            &self.fonts,
+            self.fonts,
             "Larger",
             CONTENT_RIGHT,
             caption_y,
@@ -1673,90 +1659,6 @@ fn dpi_x(dpi: u32) -> i32 {
     SLIDER_X + (i64::from(offset) * i64::from(SLIDER_WIDTH) / i64::from(MAX_DPI - MIN_DPI)) as i32
 }
 
-struct FontSet {
-    regular: Option<Font>,
-    semibold: Option<Font>,
-}
-
-impl FontSet {
-    fn face(&self, semibold: bool) -> Option<&Font> {
-        if semibold {
-            self.semibold.as_ref().or(self.regular.as_ref())
-        } else {
-            self.regular.as_ref()
-        }
-    }
-
-    fn text_width(&self, text: &str, size: f32, semibold: bool) -> i32 {
-        if let Some(font) = self.face(semibold) {
-            text.chars()
-                .map(|character| font.metrics(character, size).advance_width)
-                .sum::<f32>()
-                .round() as i32
-        } else {
-            let scale = (size / 8.0).round().max(1.0) as i32;
-            (text.chars().count() as i32 * 6 - 1).max(0) * scale
-        }
-    }
-
-    fn fit(&self, text: &str, size: f32, semibold: bool, maximum_width: i32) -> String {
-        if self.text_width(text, size, semibold) <= maximum_width {
-            return text.to_owned();
-        }
-        let mut fitted: String = text.to_owned();
-        while !fitted.is_empty() {
-            fitted.pop();
-            let candidate = format!("{}…", fitted.trim_end());
-            if self.text_width(&candidate, size, semibold) <= maximum_width {
-                return candidate;
-            }
-        }
-        "…".to_owned()
-    }
-
-    fn load() -> Self {
-        let directories = [
-            "/usr/share/fonts/prelude",
-            "/usr/share/fonts/nocturne",
-            "/usr/share/fonts/truetype/inter",
-            "/usr/share/fonts/truetype/Roboto",
-            "/usr/share/fonts/truetype/roboto",
-            "/usr/share/fonts/Roboto",
-            "/usr/share/fonts/ttf",
-            "/usr/share/fonts",
-        ];
-        let regular = load_font(&directories, &["Inter-Regular.ttf", "Roboto-Regular.ttf"]);
-        let semibold = load_font(
-            &directories,
-            &["Inter-SemiBold.ttf", "Inter-Bold.ttf", "Roboto-Bold.ttf"],
-        );
-        if regular.is_none() {
-            warn!("no Inter or Roboto font was found; using the built-in settings glyphs");
-        }
-        Self { regular, semibold }
-    }
-}
-
-fn load_font(directories: &[&str], names: &[&str]) -> Option<Font> {
-    directories
-        .iter()
-        .flat_map(|directory| names.iter().map(move |name| (*directory, *name)))
-        .find_map(|(directory, name)| {
-            let path = PathBuf::from(directory).join(name);
-            let metadata = fs::symlink_metadata(&path).ok()?;
-            if !metadata.file_type().is_file()
-                || metadata.file_type().is_symlink()
-                || metadata.file_type().is_block_device()
-                || metadata.len() == 0
-                || metadata.len() > MAXIMUM_FONT_BYTES
-            {
-                return None;
-            }
-            let bytes = fs::read(path).ok()?;
-            Font::from_bytes(bytes, FontSettings::default()).ok()
-        })
-}
-
 struct Canvas {
     rgb: Vec<u8>,
     offset_y: i32,
@@ -1913,12 +1815,9 @@ impl Canvas {
         color: [u8; 3],
         semibold: bool,
     ) {
-        let font = fonts.face(semibold);
-        if let Some(font) = font {
-            self.font_text(font, text, x, center_y, size, color);
-        } else {
-            self.bitmap_text(text, x, center_y, size, color);
-        }
+        fonts.draw(text, (x, center_y), size, semibold, |px, py, alpha| {
+            self.blend(px, py, color, alpha);
+        });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1958,65 +1857,6 @@ impl Canvas {
             semibold,
         );
     }
-    fn font_text(
-        &mut self,
-        font: &Font,
-        text: &str,
-        x: i32,
-        center_y: i32,
-        size: f32,
-        color: [u8; 3],
-    ) {
-        let mut cursor_x = x as f32;
-        let baseline = font
-            .horizontal_line_metrics(size)
-            .map_or(size / 2.0, |metrics| {
-                (metrics.ascent + metrics.descent) / 2.0
-            })
-            .round() as i32
-            + center_y;
-        for character in text.chars() {
-            let (metrics, bitmap) = font.rasterize(character, size);
-            let glyph_x = cursor_x.round() as i32 + metrics.xmin;
-            let glyph_y = baseline - metrics.height as i32 - metrics.ymin;
-            for row in 0..metrics.height {
-                for column in 0..metrics.width {
-                    let alpha = bitmap[row * metrics.width + column];
-                    if alpha != 0 {
-                        self.blend(glyph_x + column as i32, glyph_y + row as i32, color, alpha);
-                    }
-                }
-            }
-            cursor_x += metrics.advance_width;
-        }
-    }
-
-    fn bitmap_text(&mut self, text: &str, x: i32, center_y: i32, size: f32, color: [u8; 3]) {
-        let scale = (size / 8.0).round().max(1.0) as i32;
-        let mut cursor_x = x;
-        let y = center_y - 7 * scale / 2;
-        for character in text.chars() {
-            if let Some(glyph) = bitmap_glyph(character) {
-                for (row, bits) in glyph.iter().enumerate() {
-                    for column in 0..5 {
-                        if bits & (1 << (4 - column)) != 0 {
-                            self.rounded_rect(
-                                cursor_x + column * scale,
-                                y + row as i32 * scale,
-                                scale,
-                                scale,
-                                0,
-                                color,
-                                255,
-                            );
-                        }
-                    }
-                }
-            }
-            cursor_x += 6 * scale;
-        }
-    }
-
     fn blend(&mut self, x: i32, y: i32, color: [u8; 3], alpha: u8) {
         let y = y - self.offset_y;
         if !(0..DISPLAY_WIDTH as i32).contains(&x)
@@ -2100,67 +1940,13 @@ fn rounded_rect_distance(
     }
 }
 
-fn bitmap_glyph(character: char) -> Option<[u8; 7]> {
-    let character = character.to_ascii_uppercase();
-    Some(match character {
-        'A' => [0x0e, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11],
-        'B' => [0x1e, 0x11, 0x11, 0x1e, 0x11, 0x11, 0x1e],
-        'C' => [0x0f, 0x10, 0x10, 0x10, 0x10, 0x10, 0x0f],
-        'D' => [0x1e, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1e],
-        'E' => [0x1f, 0x10, 0x10, 0x1e, 0x10, 0x10, 0x1f],
-        'F' => [0x1f, 0x10, 0x10, 0x1e, 0x10, 0x10, 0x10],
-        'G' => [0x0f, 0x10, 0x10, 0x17, 0x11, 0x11, 0x0f],
-        'H' => [0x11, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11],
-        'I' => [0x1f, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1f],
-        'J' => [0x01, 0x01, 0x01, 0x01, 0x11, 0x11, 0x0e],
-        'K' => [0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11],
-        'L' => [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1f],
-        'M' => [0x11, 0x1b, 0x15, 0x15, 0x11, 0x11, 0x11],
-        'N' => [0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11],
-        'O' => [0x0e, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e],
-        'P' => [0x1e, 0x11, 0x11, 0x1e, 0x10, 0x10, 0x10],
-        'Q' => [0x0e, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0d],
-        'R' => [0x1e, 0x11, 0x11, 0x1e, 0x14, 0x12, 0x11],
-        'S' => [0x0f, 0x10, 0x10, 0x0e, 0x01, 0x01, 0x1e],
-        'T' => [0x1f, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
-        'U' => [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e],
-        'V' => [0x11, 0x11, 0x11, 0x11, 0x11, 0x0a, 0x04],
-        'W' => [0x11, 0x11, 0x11, 0x15, 0x15, 0x1b, 0x11],
-        'X' => [0x11, 0x11, 0x0a, 0x04, 0x0a, 0x11, 0x11],
-        'Y' => [0x11, 0x11, 0x0a, 0x04, 0x04, 0x04, 0x04],
-        'Z' => [0x1f, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1f],
-        '0' => [0x0e, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0e],
-        '1' => [0x04, 0x0c, 0x04, 0x04, 0x04, 0x04, 0x0e],
-        '2' => [0x0e, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1f],
-        '3' => [0x1e, 0x01, 0x01, 0x0e, 0x01, 0x01, 0x1e],
-        '4' => [0x02, 0x06, 0x0a, 0x12, 0x1f, 0x02, 0x02],
-        '5' => [0x1f, 0x10, 0x10, 0x1e, 0x01, 0x01, 0x1e],
-        '6' => [0x0e, 0x10, 0x10, 0x1e, 0x11, 0x11, 0x0e],
-        '7' => [0x1f, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08],
-        '8' => [0x0e, 0x11, 0x11, 0x0e, 0x11, 0x11, 0x0e],
-        '9' => [0x0e, 0x11, 0x11, 0x0f, 0x01, 0x01, 0x0e],
-        ' ' => [0; 7],
-        '.' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x0c],
-        ':' => [0x00, 0x0c, 0x0c, 0x00, 0x0c, 0x0c, 0x00],
-        '-' | '−' => [0x00, 0x00, 0x00, 0x1f, 0x00, 0x00, 0x00],
-        '/' => [0x01, 0x02, 0x02, 0x04, 0x08, 0x08, 0x10],
-        '+' => [0x00, 0x04, 0x04, 0x1f, 0x04, 0x04, 0x00],
-        '·' => [0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00],
-        '•' => [0x00, 0x04, 0x0e, 0x1f, 0x0e, 0x04, 0x00],
-        '‹' => [0x00, 0x02, 0x04, 0x08, 0x04, 0x02, 0x00],
-        '›' => [0x00, 0x08, 0x04, 0x02, 0x04, 0x08, 0x00],
-        '…' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x15],
-        '\'' | '’' => [0x04, 0x04, 0x08, 0x00, 0x00, 0x00, 0x00],
-        _ => return None,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use platform_superbird::MonotonicMicros;
     use prelude_wireless::bluez::PhoneKind;
 
     use super::*;
+    use crate::fonts::bitmap_glyph;
 
     struct NullSurface;
 

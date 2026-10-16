@@ -18,44 +18,90 @@ pub enum DisplayPlatform {
 pub enum DisplayStatus {
     WaitingForPhone,
     UnlockPhone,
-    Connecting,
+    Connecting(Option<ConnectionStep>),
     Connected,
     MissingAudioOutput,
 }
 
-impl DisplayPlatform {
-    pub const fn overlay_path(self) -> &'static str {
-        self.status_overlay_path(DisplayStatus::WaitingForPhone)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionStep {
+    AccessoryMode,
+    OpeningConnection,
+    ExchangingVersions,
+    SecuringConnection,
+    DiscoveringServices,
+    OpeningChannels,
+    StartingMedia,
+    StartingUsbNetwork,
+    StartingWifi,
+    PreparingAuthentication,
+    StartingReceiver,
+    Authenticating,
+    WaitingForCarPlay,
+    StartingCarPlay,
+    WaitingForIphone,
+    WaitingForIphoneOnWifi,
+    VerifyingPairing,
+    SettingUpSession,
+    SettingUpStreams,
+    StartingStream,
+}
+
+impl ConnectionStep {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::AccessoryMode => "Switching phone to accessory mode",
+            Self::OpeningConnection => "Opening connection",
+            Self::ExchangingVersions => "Exchanging protocol versions",
+            Self::SecuringConnection => "Securing connection",
+            Self::DiscoveringServices => "Discovering services",
+            Self::OpeningChannels => "Opening channels",
+            Self::StartingMedia => "Starting audio and video",
+            Self::StartingUsbNetwork => "Starting USB network",
+            Self::StartingWifi => "Starting Wi-Fi",
+            Self::PreparingAuthentication => "Preparing authentication",
+            Self::StartingReceiver => "Starting CarPlay receiver",
+            Self::Authenticating => "Authenticating",
+            Self::WaitingForCarPlay => "Waiting for iPhone to offer CarPlay",
+            Self::StartingCarPlay => "Starting CarPlay",
+            Self::WaitingForIphone => "Waiting for iPhone",
+            Self::WaitingForIphoneOnWifi => "Waiting for iPhone to join Wi-Fi",
+            Self::VerifyingPairing => "Verifying pairing",
+            Self::SettingUpSession => "Setting up session",
+            Self::SettingUpStreams => "Setting up audio and video",
+            Self::StartingStream => "Starting stream",
+        }
+    }
+}
+
+impl DisplayStatus {
+    pub const fn headline(self) -> &'static str {
+        match self {
+            Self::WaitingForPhone => "Waiting for phone…",
+            Self::UnlockPhone => "Unlock your phone",
+            Self::Connecting(_) => "Connecting…",
+            Self::Connected => "Connected!",
+            Self::MissingAudioOutput => "Missing audio output device",
+        }
     }
 
-    pub const fn status_overlay_path(self, status: DisplayStatus) -> &'static str {
-        match (self, status) {
-            (Self::CarPlay, DisplayStatus::WaitingForPhone) => "/usr/share/prelude/carplay.nv12",
-            (Self::CarPlay, DisplayStatus::UnlockPhone) => {
-                "/usr/share/prelude/carplay-unlock-phone.nv12"
-            }
-            (Self::CarPlay, DisplayStatus::Connecting) => {
-                "/usr/share/prelude/carplay-connecting.nv12"
-            }
-            (Self::CarPlay, DisplayStatus::Connected) => {
-                "/usr/share/prelude/carplay-connected.nv12"
-            }
-            (Self::CarPlay, DisplayStatus::MissingAudioOutput) => {
-                "/usr/share/prelude/carplay-missing-audio.nv12"
-            }
-            (Self::AndroidAuto, DisplayStatus::WaitingForPhone) => {
-                "/usr/share/prelude/android-auto.nv12"
-            }
-            (Self::AndroidAuto, DisplayStatus::UnlockPhone)
-            | (Self::AndroidAuto, DisplayStatus::Connecting) => {
-                "/usr/share/prelude/android-auto-connecting.nv12"
-            }
-            (Self::AndroidAuto, DisplayStatus::Connected) => {
-                "/usr/share/prelude/android-auto-connected.nv12"
-            }
-            (Self::AndroidAuto, DisplayStatus::MissingAudioOutput) => {
-                "/usr/share/prelude/android-auto-missing-audio.nv12"
-            }
+    pub const fn detail(self) -> Option<&'static str> {
+        match self {
+            Self::Connecting(Some(step)) => Some(step.label()),
+            Self::Connected => Some("Waiting for video"),
+            Self::WaitingForPhone
+            | Self::UnlockPhone
+            | Self::Connecting(None)
+            | Self::MissingAudioOutput => None,
+        }
+    }
+}
+
+impl DisplayPlatform {
+    pub const fn logo_path(self) -> &'static str {
+        match self {
+            Self::CarPlay => "/usr/share/prelude/carplay-logo.nv12",
+            Self::AndroidAuto => "/usr/share/prelude/android-auto-logo.nv12",
         }
     }
 
@@ -163,18 +209,17 @@ mod tests {
     }
 
     #[test]
-    fn status_overlay_paths_are_platform_specific() {
+    fn only_progress_statuses_carry_a_detail_line() {
+        assert_eq!(DisplayStatus::WaitingForPhone.detail(), None);
+        assert_eq!(DisplayStatus::Connecting(None).detail(), None);
         assert_eq!(
-            DisplayPlatform::CarPlay.status_overlay_path(DisplayStatus::UnlockPhone),
-            "/usr/share/prelude/carplay-unlock-phone.nv12"
+            DisplayStatus::Connecting(Some(ConnectionStep::SecuringConnection)).detail(),
+            Some("Securing connection")
         );
         assert_eq!(
-            DisplayPlatform::AndroidAuto.status_overlay_path(DisplayStatus::Connected),
-            "/usr/share/prelude/android-auto-connected.nv12"
+            DisplayStatus::Connecting(Some(ConnectionStep::Authenticating)).headline(),
+            DisplayStatus::Connecting(None).headline()
         );
-        assert_eq!(
-            DisplayPlatform::CarPlay.status_overlay_path(DisplayStatus::MissingAudioOutput),
-            "/usr/share/prelude/carplay-missing-audio.nv12"
-        );
+        assert_eq!(DisplayStatus::Connected.detail(), Some("Waiting for video"));
     }
 }

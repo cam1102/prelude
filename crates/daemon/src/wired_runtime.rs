@@ -42,7 +42,7 @@ use crate::{
     UnsupportedProjectionRuntime, iap2_runtime::SessionStartPlan,
 };
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
-use crate::{DisplayPlatform, DisplayStatus, persist_last_display_platform};
+use crate::{ConnectionStep, DisplayPlatform, DisplayStatus, persist_last_display_platform};
 #[cfg(target_os = "linux")]
 use crate::{
     airplay_runtime::{AirPlayProgress, AirPlayRuntime, AirPlayStage},
@@ -579,9 +579,9 @@ pub(crate) fn apply_carplay_display_status(
     let projection_active = status != DisplayStatus::WaitingForPhone;
     if *current != Some(status) {
         let overlay =
-            fs::read(DisplayPlatform::CarPlay.status_overlay_path(status)).map_err(|error| {
+            crate::status_screen::render(DisplayPlatform::CarPlay, status).map_err(|error| {
                 Error::Runtime(format!(
-                    "reading the CarPlay status overlay failed: {error}"
+                    "rendering the CarPlay status screen failed: {error}"
                 ))
             })?;
         display.set_waiting_overlay(overlay).map_err(|error| {
@@ -710,7 +710,13 @@ impl ProjectionRuntime for WiredCarkitRuntime {
                         if session.airplay.audio_output_missing() {
                             Some(DisplayStatus::MissingAudioOutput)
                         } else {
-                            Some(DisplayStatus::Connected)
+                            Some(
+                                session
+                                    .airplay
+                                    .snapshot()
+                                    .stage
+                                    .display_status(ConnectionStep::WaitingForIphone),
+                            )
                         }
                     }
                 }
@@ -1567,11 +1573,16 @@ fn worker_probe(progress: &SharedProgress, config: &crate::Iap2Config) -> Runtim
 
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
 fn carplay_display_status(stage: WorkerStage) -> DisplayStatus {
-    if stage == WorkerStage::ConnectingCarrier {
-        DisplayStatus::UnlockPhone
-    } else {
-        DisplayStatus::Connecting
-    }
+    let step = match stage {
+        WorkerStage::ConnectingCarrier => return DisplayStatus::UnlockPhone,
+        WorkerStage::BringingUpNcm => ConnectionStep::StartingUsbNetwork,
+        WorkerStage::OpeningMfi => ConnectionStep::PreparingAuthentication,
+        WorkerStage::BindingAirplay => ConnectionStep::StartingReceiver,
+        WorkerStage::Setup => ConnectionStep::Authenticating,
+        WorkerStage::Availability => ConnectionStep::WaitingForCarPlay,
+        WorkerStage::Start => ConnectionStep::StartingCarPlay,
+    };
+    DisplayStatus::Connecting(Some(step))
 }
 
 #[cfg(target_os = "linux")]

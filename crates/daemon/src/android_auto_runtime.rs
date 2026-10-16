@@ -4,8 +4,6 @@
 )]
 
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
-use std::fs;
-#[cfg(all(target_os = "linux", feature = "linux-media"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     collections::BTreeMap,
@@ -28,10 +26,9 @@ use prelude_android_auto::{
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
 use prelude_android_auto_protocol::{
     AudioChannel as ProtocolAudioChannel, DisconnectReason, Event, Session, SessionConfig,
-    SessionState,
 };
 use prelude_android_auto_protocol::{
-    Button as ProtocolButton, Command, MediaKey, TouchAction, TouchPointer,
+    Button as ProtocolButton, Command, MediaKey, SessionState, TouchAction, TouchPointer,
 };
 use prelude_control::{ImplementationStatus, ProjectionCapabilities};
 use prelude_media::{
@@ -63,7 +60,7 @@ use prelude_media::{
 use crate::first_video::{FirstVideoAction, FirstVideoWatchdog};
 use crate::{
     AndroidAutoConfig, AudioBackend, AudioPipelineState, AudioRuntimeRoute, AudioRuntimeSnapshot,
-    DaemonConfig, DisplayPlatform, DisplayStatus, Error, HealthState, MediaConfig,
+    ConnectionStep, DaemonConfig, DisplayPlatform, DisplayStatus, Error, HealthState, MediaConfig,
     ProjectionDevice, ProjectionMode, ProjectionRuntime, Result, RuntimeProbe,
     persist_last_display_platform,
 };
@@ -123,6 +120,7 @@ impl WorkerStage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WorkerProgress {
     stage: WorkerStage,
+    session_state: Option<SessionState>,
     audio_ready: bool,
     input_ready: bool,
     video_ready: bool,
@@ -140,6 +138,7 @@ impl Default for WorkerProgress {
     fn default() -> Self {
         Self {
             stage: WorkerStage::OpeningAoap,
+            session_state: None,
             audio_ready: false,
             input_ready: false,
             video_ready: false,
@@ -424,10 +423,10 @@ impl AndroidAutoRuntime {
                 })?;
             return Ok(());
         }
-        let overlay = fs::read(DisplayPlatform::AndroidAuto.status_overlay_path(status)).map_err(
+        let overlay = crate::status_screen::render(DisplayPlatform::AndroidAuto, status).map_err(
             |error| {
                 Error::Runtime(format!(
-                    "reading the Android Auto status overlay failed: {error}"
+                    "rendering the Android Auto status screen failed: {error}"
                 ))
             },
         )?;
@@ -631,7 +630,7 @@ impl ProjectionRuntime for AndroidAutoRuntime {
                     ))
                 },
             )?;
-            self.set_display_status(DisplayStatus::Connecting)?;
+            self.set_display_status(DisplayStatus::Connecting(None))?;
             self.missing_audio_output = false;
             let handle = match thread::Builder::new()
                 .name("ct-android-auto".to_owned())
@@ -922,18 +921,28 @@ fn probe_for_progress(progress: WorkerProgress) -> RuntimeProbe {
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "linux-media"))]
+#[cfg(any(test, all(target_os = "linux", feature = "linux-media")))]
 fn android_auto_display_status(progress: WorkerProgress) -> DisplayStatus {
-    match progress.stage {
-        WorkerStage::Running => DisplayStatus::Connected,
-        WorkerStage::OpeningAoap
-        | WorkerStage::OpeningProtocol
-        | WorkerStage::Negotiating
-        | WorkerStage::StartingMedia
-        | WorkerStage::ShuttingDown
-        | WorkerStage::Stopped
-        | WorkerStage::Failed => DisplayStatus::Connecting,
-    }
+    let step = match progress.stage {
+        WorkerStage::Running => return DisplayStatus::Connected,
+        WorkerStage::OpeningAoap => Some(ConnectionStep::AccessoryMode),
+        WorkerStage::OpeningProtocol => Some(ConnectionStep::OpeningConnection),
+        WorkerStage::Negotiating => match progress.session_state {
+            None | Some(SessionState::Created) => Some(ConnectionStep::OpeningConnection),
+            Some(SessionState::Version) => Some(ConnectionStep::ExchangingVersions),
+            Some(SessionState::TlsHandshake | SessionState::Auth) => {
+                Some(ConnectionStep::SecuringConnection)
+            }
+            Some(SessionState::ServiceDiscovery) => Some(ConnectionStep::DiscoveringServices),
+            Some(SessionState::ChannelSetup | SessionState::Running) => {
+                Some(ConnectionStep::OpeningChannels)
+            }
+            Some(SessionState::Closing | SessionState::Closed) => None,
+        },
+        WorkerStage::StartingMedia => Some(ConnectionStep::StartingMedia),
+        WorkerStage::ShuttingDown | WorkerStage::Stopped | WorkerStage::Failed => None,
+    };
+    DisplayStatus::Connecting(step)
 }
 
 fn requested_audio_route(config: &AndroidAutoConfig, media: &MediaConfig) -> AudioRuntimeRoute {
@@ -947,6 +956,16 @@ fn requested_audio_route(config: &AndroidAutoConfig, media: &MediaConfig) -> Aud
 fn is_missing_audio_output(detail: &str) -> bool {
     (detail.contains("USB DAC") && detail.contains("not connected"))
         || detail.contains("matched USB DAC has no ALSA playback PCM")
+}
+
+#[cfg(all(target_os = "linux", feature = "linux-media"))]
+fn set_session_state(progress: &SharedProgress, state: SessionState) {
+    if let Ok(mut progress) = progress.lock()
+        && progress.session_state != Some(state)
+    {
+        progress.session_state = Some(state);
+        tracing::info!(?state, "Android Auto session state");
+    }
 }
 
 fn set_stage(progress: &SharedProgress, stage: WorkerStage) {
@@ -2323,6 +2342,7 @@ fn run_protocol<T: std::io::Read + std::io::Write + Send>(
     session
         .start()
         .map_err(|error| format!("starting Android Auto Protocol session failed: {error}"))?;
+    set_session_state(progress, session.state());
     set_stage(progress, WorkerStage::Negotiating);
 
     let mut media = None;
@@ -2355,6 +2375,9 @@ fn run_protocol<T: std::io::Read + std::io::Write + Send>(
             let events = session
                 .poll()
                 .map_err(|error| format!("polling Android Auto Protocol failed: {error}"))?;
+            if media.is_none() {
+                set_session_state(progress, session.state());
+            }
             for event in events {
                 update_progress(progress, |progress| {
                     progress.protocol_events = progress.protocol_events.saturating_add(1);
@@ -2818,6 +2841,7 @@ mod tests {
 
         let live_media_without_video_or_microphone = WorkerProgress {
             stage: WorkerStage::Running,
+            session_state: Some(SessionState::Running),
             audio_ready: true,
             input_ready: true,
             video_ready: false,
@@ -2867,6 +2891,44 @@ mod tests {
         });
         assert_eq!(failed.state, HealthState::Failed);
         assert_eq!(failed.session_state, HealthState::Failed);
+    }
+
+    #[test]
+    fn display_status_follows_the_protocol_session_until_video_is_due() {
+        let status = |stage, session_state| {
+            android_auto_display_status(WorkerProgress {
+                stage,
+                session_state,
+                ..WorkerProgress::default()
+            })
+        };
+        assert_eq!(
+            status(WorkerStage::OpeningAoap, None),
+            DisplayStatus::Connecting(Some(ConnectionStep::AccessoryMode))
+        );
+        assert_eq!(
+            status(WorkerStage::Negotiating, Some(SessionState::TlsHandshake)),
+            DisplayStatus::Connecting(Some(ConnectionStep::SecuringConnection))
+        );
+        assert_eq!(
+            status(
+                WorkerStage::Negotiating,
+                Some(SessionState::ServiceDiscovery)
+            ),
+            DisplayStatus::Connecting(Some(ConnectionStep::DiscoveringServices))
+        );
+        assert_eq!(
+            status(WorkerStage::StartingMedia, Some(SessionState::Running)),
+            DisplayStatus::Connecting(Some(ConnectionStep::StartingMedia))
+        );
+        assert_eq!(
+            status(WorkerStage::Running, Some(SessionState::Running)),
+            DisplayStatus::Connected
+        );
+        assert_eq!(
+            status(WorkerStage::Failed, Some(SessionState::Closed)),
+            DisplayStatus::Connecting(None)
+        );
     }
 
     #[test]

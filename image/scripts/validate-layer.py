@@ -151,28 +151,10 @@ otg_host_health = text(
 )
 otg_image = text("meta-prelude/recipes-core/images/prelude-dev-image.bb")
 prod_otg_image = text("meta-prelude/recipes-core/images/prelude-prod-image.bb")
-startup_overlays = {
-    "CarPlay": ROOT / "meta-prelude/recipes-core/prelude/files/carplay.nv12",
+logo_overlays = {
+    "CarPlay": ROOT / "meta-prelude/recipes-core/prelude/files/carplay-logo.nv12",
     "Android Auto": ROOT
-    / "meta-prelude/recipes-core/prelude/files/android-auto.nv12",
-}
-status_overlays = {
-    "CarPlay waiting": startup_overlays["CarPlay"],
-    "CarPlay unlock": ROOT
-    / "meta-prelude/recipes-core/prelude/files/carplay-unlock-phone.nv12",
-    "CarPlay connecting": ROOT
-    / "meta-prelude/recipes-core/prelude/files/carplay-connecting.nv12",
-    "CarPlay connected": ROOT
-    / "meta-prelude/recipes-core/prelude/files/carplay-connected.nv12",
-    "CarPlay missing audio": ROOT
-    / "meta-prelude/recipes-core/prelude/files/carplay-missing-audio.nv12",
-    "Android Auto waiting": startup_overlays["Android Auto"],
-    "Android Auto connecting": ROOT
-    / "meta-prelude/recipes-core/prelude/files/android-auto-connecting.nv12",
-    "Android Auto connected": ROOT
-    / "meta-prelude/recipes-core/prelude/files/android-auto-connected.nv12",
-    "Android Auto missing audio": ROOT
-    / "meta-prelude/recipes-core/prelude/files/android-auto-missing-audio.nv12",
+    / "meta-prelude/recipes-core/prelude/files/android-auto-logo.nv12",
 }
 
 if f"commit: {PIN}" not in kas:
@@ -526,43 +508,26 @@ if "SYSTEMD_AUTO_ENABLE" in prod_otg_image:
     fail(
         "production OTG image incorrectly tries to override another recipe's systemd policy"
     )
-for label, status_overlay in status_overlays.items():
-    if not status_overlay.is_file() or status_overlay.stat().st_size != 800 * 480 * 3 // 2:
-        fail(f"packaged {label} overlay is not one 800x480 NV12 frame")
-expected_overlay_hashes = {
-    "CarPlay waiting": "a1a5f41a60fd909163ebbde83921b80d2f1f3f6c6703f97fad937ef3225ed055",
-    "CarPlay unlock": "357b9611a1618d5f6682a3896672fa5822219e66456e8c62631928a4e361204e",
-    "CarPlay connecting": "2068c2f77a706e5082125f4881a88070db81e99be43297bdffb76181d97442b2",
-    "CarPlay connected": "14bad31f686da1c4a5f00a741de6cfbca4d2edfc2e830e969e4d23b8eff4d24c",
-    "CarPlay missing audio": "114937189a8cab25acb9eefd861e2d107951a57eabd69ebe28b63fde113e3796",
-    "Android Auto waiting": "e2940971db3c0eaed42f844963f91d5056e9dc3e2b900df5603f25c2333c56e5",
-    "Android Auto connecting": "a4988d1235bb922f374dc3b81257a5af518cf8a68853c6f206dc029207827a40",
-    "Android Auto connected": "e6daf507c1872844299e70554d153821788c6c34ea24614024585949a4740824",
-    "Android Auto missing audio": "5b27408cf3afa2f9d3f3e6fdb06ac5b278314af31b581d83f3cf0457287b7a9d",
+for label, logo_overlay in logo_overlays.items():
+    if not logo_overlay.is_file() or logo_overlay.stat().st_size != 800 * 480 * 3 // 2:
+        fail(f"packaged {label} logo is not one 800x480 NV12 frame")
+expected_logo_hashes = {
+    "CarPlay": "036c4d51198eaf0fbb2fd13c3d3b6cfab1eaff5b44ecf8c5d17ea5267075b124",
+    "Android Auto": "5c658f778f8265a02913e6c77d684d542fe95951225f33e53019f3ae3ae3fb52",
 }
-for label, status_overlay in status_overlays.items():
-    if hashlib.sha256(status_overlay.read_bytes()).hexdigest() != expected_overlay_hashes[label]:
-        fail(f"packaged {label} overlay does not match the supplied frame")
+for label, logo_overlay in logo_overlays.items():
+    if hashlib.sha256(logo_overlay.read_bytes()).hexdigest() != expected_logo_hashes[label]:
+        fail(f"packaged {label} logo does not match the supplied frame")
+    if expected_logo_hashes[label] not in prod_otg_image:
+        fail(f"production OTG image does not pin the {label} logo frame")
+if "Inter-Regular.ttf" not in prod_otg_image:
+    fail("production OTG image does not check for the status text font")
 for package_contract in (
-    "file://carplay.nv12",
-    "file://carplay-unlock-phone.nv12",
-    "file://carplay-connecting.nv12",
-    "file://carplay-connected.nv12",
-    "file://carplay-missing-audio.nv12",
-    "file://android-auto.nv12",
-    "file://android-auto-connecting.nv12",
-    "file://android-auto-connected.nv12",
-    "file://android-auto-missing-audio.nv12",
+    "file://carplay-logo.nv12",
+    "file://android-auto-logo.nv12",
     "$overlay is not an 800x480 NV12 frame",
-    "a1a5f41a60fd909163ebbde83921b80d2f1f3f6c6703f97fad937ef3225ed055",
-    "357b9611a1618d5f6682a3896672fa5822219e66456e8c62631928a4e361204e",
-    "2068c2f77a706e5082125f4881a88070db81e99be43297bdffb76181d97442b2",
-    "14bad31f686da1c4a5f00a741de6cfbca4d2edfc2e830e969e4d23b8eff4d24c",
-    "114937189a8cab25acb9eefd861e2d107951a57eabd69ebe28b63fde113e3796",
-    "e2940971db3c0eaed42f844963f91d5056e9dc3e2b900df5603f25c2333c56e5",
-    "a4988d1235bb922f374dc3b81257a5af518cf8a68853c6f206dc029207827a40",
-    "e6daf507c1872844299e70554d153821788c6c34ea24614024585949a4740824",
-    "5b27408cf3afa2f9d3f3e6fdb06ac5b278314af31b581d83f3cf0457287b7a9d",
+    "036c4d51198eaf0fbb2fd13c3d3b6cfab1eaff5b44ecf8c5d17ea5267075b124",
+    "5c658f778f8265a02913e6c77d684d542fe95951225f33e53019f3ae3ae3fb52",
     "${datadir}/prelude/*.nv12",
 ):
     if package_contract not in recipe:
