@@ -81,6 +81,7 @@ const AUDIO_MEDIA_RATE: u32 = 48_000;
 const AUDIO_VOICE_RATE: u32 = 16_000;
 const AUDIO_MEDIA_CHANNELS: u8 = 2;
 const AUDIO_VOICE_CHANNELS: u8 = 1;
+const AUDIO_PLAYOUT_LATENCY_MS: u32 = 200;
 const MICROPHONE_FRAME_DURATION_MICROS: u32 = 20_000;
 const MICROPHONE_MAXIMUM_FRAME_BYTES: usize = 4_096;
 const MICROPHONE_MAXIMUM_BUFFER_BYTES: usize = 16 * 1024;
@@ -1177,14 +1178,10 @@ impl AudioClock {
         format_id: AudioFormatId,
         sample_rate_hz: u32,
         channels: u8,
-        timestamp_ns: Option<u64>,
         pcm_s16le: &[u8],
     ) -> std::result::Result<EncryptedAudioFrame, String> {
         let payload = pcm_s16le_to_be(pcm_s16le)?;
-        let timestamp = timestamp_ns.map_or(self.next_timestamp, |timestamp_ns| {
-            let samples = u128::from(timestamp_ns) * u128::from(sample_rate_hz) / 1_000_000_000;
-            samples as u32
-        });
+        let timestamp = self.next_timestamp;
         let sample_count = u32::try_from(payload.len() / 2 / usize::from(channels))
             .map_err(|_| "Android Auto PCM sample count overflows u32".to_owned())?;
         self.next_timestamp = timestamp.wrapping_add(sample_count);
@@ -1214,6 +1211,56 @@ impl AudioClock {
             payload,
             rtp_packet,
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct AudioIngressWindow {
+    packets: u64,
+    bytes: u64,
+    peak: u16,
+    max_gap: Duration,
+    last_arrival: Option<Instant>,
+    first_phone_micros: Option<u64>,
+    last_phone_micros: Option<u64>,
+}
+
+impl AudioIngressWindow {
+    fn record(&mut self, now: Instant, phone_micros: Option<u64>, pcm_s16le: &[u8]) {
+        self.packets = self.packets.saturating_add(1);
+        self.bytes = self.bytes.saturating_add(pcm_s16le.len() as u64);
+        for sample in pcm_s16le.chunks_exact(2) {
+            self.peak = self
+                .peak
+                .max(i16::from_le_bytes([sample[0], sample[1]]).unsigned_abs());
+        }
+        if let Some(last) = self.last_arrival {
+            self.max_gap = self.max_gap.max(now.saturating_duration_since(last));
+        }
+        self.last_arrival = Some(now);
+        if phone_micros.is_some() {
+            self.first_phone_micros = self.first_phone_micros.or(phone_micros);
+            self.last_phone_micros = phone_micros;
+        }
+    }
+
+    fn audio_millis(&self, sample_rate_hz: u32, channels: u8) -> u64 {
+        self.bytes * 1_000 / (u64::from(sample_rate_hz) * u64::from(channels) * 2)
+    }
+
+    fn phone_span_millis(&self) -> Option<u64> {
+        Some(
+            self.last_phone_micros?
+                .saturating_sub(self.first_phone_micros?)
+                / 1_000,
+        )
+    }
+
+    fn restart(&mut self) {
+        *self = Self {
+            last_arrival: self.last_arrival,
+            ..Self::default()
+        };
     }
 }
 
@@ -1420,6 +1467,7 @@ struct LiveMedia {
     display: Option<LinuxDisplayHandle>,
     audio: Option<LinuxAudioBackend>,
     audio_clocks: [AudioClock; 3],
+    audio_ingress: [AudioIngressWindow; 3],
     microphone: Option<LinuxMicrophoneBackend>,
     input: LinuxInputBackend,
     input_mapper: InputMapper,
@@ -1429,6 +1477,9 @@ struct LiveMedia {
     status: SharedAudioStatus,
     progress: SharedProgress,
     next_video_diagnostic: Instant,
+    audio_diagnostic_started: Instant,
+    media_busy: Duration,
+    media_busy_max: Duration,
 }
 
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
@@ -1466,9 +1517,21 @@ impl LiveMedia {
         LinuxVideoBackend::preflight_with_display(video_config, display.as_ref())
             .map_err(|error| format!("Android Auto video preflight failed: {error}"))?;
         let streams = [
-            AudioStreamConfig::new(AudioStreamId::Main, AUDIO_MEDIA_FORMAT),
-            AudioStreamConfig::new(AudioStreamId::Alternate, AUDIO_VOICE_FORMAT),
-            AudioStreamConfig::new(AudioStreamId::High, AUDIO_VOICE_FORMAT),
+            AudioStreamConfig::with_negotiated_latency(
+                AudioStreamId::Main,
+                AUDIO_MEDIA_FORMAT,
+                Some(AUDIO_PLAYOUT_LATENCY_MS),
+            ),
+            AudioStreamConfig::with_negotiated_latency(
+                AudioStreamId::Alternate,
+                AUDIO_VOICE_FORMAT,
+                Some(AUDIO_PLAYOUT_LATENCY_MS),
+            ),
+            AudioStreamConfig::with_negotiated_latency(
+                AudioStreamId::High,
+                AUDIO_VOICE_FORMAT,
+                Some(AUDIO_PLAYOUT_LATENCY_MS),
+            ),
         ];
         let audio =
             if audio_output {
@@ -1527,6 +1590,7 @@ impl LiveMedia {
             display,
             audio,
             audio_clocks: [AudioClock::new(), AudioClock::new(), AudioClock::new()],
+            audio_ingress: [AudioIngressWindow::default(); 3],
             microphone: None,
             input,
             input_mapper: InputMapper::new(),
@@ -1536,6 +1600,9 @@ impl LiveMedia {
             status,
             progress,
             next_video_diagnostic: Instant::now() + VIDEO_DIAGNOSTIC_INTERVAL,
+            audio_diagnostic_started: Instant::now(),
+            media_busy: Duration::ZERO,
+            media_busy_max: Duration::ZERO,
         })
     }
 
@@ -1655,7 +1722,7 @@ impl LiveMedia {
     fn handle_audio(
         &mut self,
         channel: ProtocolAudioChannel,
-        timestamp_ns: Option<u64>,
+        timestamp_micros: Option<u64>,
         pcm_s16le: &[u8],
     ) -> std::result::Result<(), String> {
         let Some(audio) = self.audio.as_ref() else {
@@ -1684,12 +1751,12 @@ impl LiveMedia {
                 AUDIO_VOICE_CHANNELS,
             ),
         };
+        self.audio_ingress[clock_index].record(Instant::now(), timestamp_micros, pcm_s16le);
         let frame = self.audio_clocks[clock_index].frame(
             stream_id,
             format_id,
             sample_rate_hz,
             channels,
-            timestamp_ns,
             pcm_s16le,
         )?;
         audio.try_submit(frame).map_err(|error| {
@@ -1952,7 +2019,7 @@ impl LiveMedia {
                     MicrophoneBackendEvent::Packet { packet, level } => {
                         let encoded_len = packet.encoded.len();
                         match session.send(Command::MicrophonePcm {
-                            timestamp: microphone_timestamp_ns()?,
+                            timestamp: microphone_timestamp_micros()?,
                             pcm_s16le: packet.encoded,
                         }) {
                             Ok(()) => {
@@ -2004,9 +2071,53 @@ impl LiveMedia {
                 }
             }
         }
+        self.log_audio_diagnostic();
         self.log_video_diagnostic();
         self.refresh_status();
         Ok(())
+    }
+
+    fn record_busy(&mut self, started: Instant) {
+        let busy = started.elapsed();
+        self.media_busy += busy;
+        self.media_busy_max = self.media_busy_max.max(busy);
+    }
+
+    fn log_audio_diagnostic(&mut self) {
+        let now = Instant::now();
+        let window = now.saturating_duration_since(self.audio_diagnostic_started);
+        if window < VIDEO_DIAGNOSTIC_INTERVAL {
+            return;
+        }
+        self.audio_diagnostic_started = now;
+        tracing::info!(
+            window_ms = window.as_millis() as u64,
+            media_busy_ms = self.media_busy.as_millis() as u64,
+            media_busy_max_ms = self.media_busy_max.as_millis() as u64,
+            "Android Auto media loop diagnostic"
+        );
+        self.media_busy = Duration::ZERO;
+        self.media_busy_max = Duration::ZERO;
+        for (ingress, (channel, sample_rate_hz, channels)) in self.audio_ingress.iter_mut().zip([
+            ("media", AUDIO_MEDIA_RATE, AUDIO_MEDIA_CHANNELS),
+            ("guidance", AUDIO_VOICE_RATE, AUDIO_VOICE_CHANNELS),
+            ("system", AUDIO_VOICE_RATE, AUDIO_VOICE_CHANNELS),
+        ]) {
+            if ingress.packets != 0 {
+                tracing::info!(
+                    channel,
+                    window_ms = window.as_millis() as u64,
+                    packets = ingress.packets,
+                    packet_bytes = ingress.bytes / ingress.packets,
+                    audio_ms = ingress.audio_millis(sample_rate_hz, channels),
+                    phone_span_ms = ingress.phone_span_millis(),
+                    max_gap_ms = ingress.max_gap.as_millis() as u64,
+                    peak = ingress.peak,
+                    "Android Auto audio diagnostic"
+                );
+            }
+            ingress.restart();
+        }
     }
 
     fn log_video_diagnostic(&mut self) {
@@ -2148,11 +2259,11 @@ fn video_synchronization_status(
 }
 
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
-fn microphone_timestamp_ns() -> std::result::Result<u64, String> {
+fn microphone_timestamp_micros() -> std::result::Result<u64, String> {
     let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "system clock is before the Unix epoch".to_owned())?;
-    u64::try_from(elapsed.as_nanos())
+    u64::try_from(elapsed.as_micros())
         .map_err(|_| "system clock timestamp exceeds the Android Auto u64 bound".to_owned())
 }
 
@@ -2435,19 +2546,21 @@ fn run_protocol<T: std::io::Read + std::io::Write + Send>(
                         pending_microphone = Some((open, sample_rate, channels));
                     }
                     event => {
-                        media
-                            .as_mut()
-                            .ok_or_else(|| {
-                                "Android Auto media arrived before the Connected event".to_owned()
-                            })?
-                            .handle_event(event, &mut session)?;
+                        let media = media.as_mut().ok_or_else(|| {
+                            "Android Auto media arrived before the Connected event".to_owned()
+                        })?;
+                        let started = Instant::now();
+                        media.handle_event(event, &mut session)?;
+                        media.record_busy(started);
                     }
                 }
             }
             if let Some(media) = media.as_mut()
                 && session.state() == SessionState::Running
             {
+                let started = Instant::now();
                 media.poll(&mut session, controls)?;
+                media.record_busy(started);
                 if progress
                     .lock()
                     .is_ok_and(|progress| progress.video_frames > 0)
@@ -2619,22 +2732,44 @@ mod tests {
                 AUDIO_MEDIA_FORMAT,
                 AUDIO_MEDIA_RATE,
                 AUDIO_MEDIA_CHANNELS,
-                Some(1_000_000_000),
                 &[1, 0, 2, 0, 3, 0, 4, 0],
             )
-            .expect("timestamped PCM frame");
-        assert_eq!(first.timestamp, 48_000);
+            .expect("first PCM frame");
+        assert_eq!(first.timestamp, 0);
+        assert_eq!(first.sequence, 0);
         let second = clock
             .frame(
                 AudioStreamId::Main,
                 AUDIO_MEDIA_FORMAT,
                 AUDIO_MEDIA_RATE,
                 AUDIO_MEDIA_CHANNELS,
-                None,
                 &[5, 0, 6, 0, 7, 0, 8, 0],
             )
             .expect("continued PCM frame");
-        assert_eq!(second.timestamp, 48_002);
+        assert_eq!(second.timestamp, 2);
+        assert_eq!(second.sequence, 1);
+    }
+
+    #[test]
+    fn audio_ingress_window_reports_throughput_gaps_and_phone_clock_span() {
+        let start = Instant::now();
+        let mut window = AudioIngressWindow::default();
+        window.record(start, Some(5_000_000), &[0x00, 0x80, 0x10, 0x00]);
+        window.record(
+            start + Duration::from_millis(30),
+            Some(5_021_000),
+            &[0x20, 0x00, 0x30, 0x00],
+        );
+        assert_eq!(window.packets, 2);
+        assert_eq!(window.peak, 32_768);
+        assert_eq!(window.max_gap, Duration::from_millis(30));
+        assert_eq!(window.phone_span_millis(), Some(21));
+        assert_eq!(window.audio_millis(1_000, 1), 4);
+        window.restart();
+        assert_eq!(window.packets, 0);
+        assert_eq!(window.phone_span_millis(), None);
+        window.record(start + Duration::from_millis(100), None, &[0, 0]);
+        assert_eq!(window.max_gap, Duration::from_millis(70));
     }
 
     #[test]

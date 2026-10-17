@@ -588,9 +588,13 @@ pub(crate) fn status_ok() -> Vec<u8> {
 }
 
 pub(crate) fn setup_ok() -> Vec<u8> {
+    setup_ok_with_window(1)
+}
+
+pub(crate) fn setup_ok_with_window(max_unacked: u32) -> Vec<u8> {
     SetupResponse {
         media_status: AV_SETUP_OK,
-        max_unacked: Some(1),
+        max_unacked: Some(max_unacked),
         configs: vec![0],
     }
     .encode_to_vec()

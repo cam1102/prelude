@@ -1677,6 +1677,28 @@ impl PcmClockOrigin {
         })
     }
 
+    fn schedule(
+        current: Option<Self>,
+        timestamp: u32,
+        running_time_ns: u64,
+        playout_latency_ms: u32,
+        payload_bytes: usize,
+        sample_rate_hz: u32,
+        channels: u8,
+    ) -> Result<(Self, u64, u64)> {
+        if let Some(origin) = current {
+            let (pts_ns, duration_ns) =
+                origin.timing(timestamp, payload_bytes, sample_rate_hz, channels)?;
+            if pts_ns >= running_time_ns {
+                return Ok((origin, pts_ns, duration_ns));
+            }
+        }
+        let origin = Self::new(timestamp, running_time_ns, playout_latency_ms)?;
+        let (pts_ns, duration_ns) =
+            origin.timing(timestamp, payload_bytes, sample_rate_hz, channels)?;
+        Ok((origin, pts_ns, duration_ns))
+    }
+
     fn timing(
         self,
         timestamp: u32,
@@ -2239,20 +2261,16 @@ impl AudioGstPipeline {
                 .current_running_time()
                 .ok_or_else(|| Error::Backend("audio mixer has no running-time clock".to_owned()))?
                 .nseconds();
-            let origin = *self
-                .clock_origins
-                .entry(frame.stream_id)
-                .or_insert(PcmClockOrigin::new(
-                    frame.timestamp,
-                    running_time_ns,
-                    stream.playout_latency_ms,
-                )?);
-            let (pts_ns, duration_ns) = origin.timing(
+            let (origin, pts_ns, duration_ns) = PcmClockOrigin::schedule(
+                self.clock_origins.get(&frame.stream_id).copied(),
                 frame.timestamp,
+                running_time_ns,
+                stream.playout_latency_ms,
                 frame.payload.len(),
                 sample_rate_hz,
                 channels,
             )?;
+            self.clock_origins.insert(frame.stream_id, origin);
             let writable = buffer.get_mut().ok_or_else(|| {
                 Error::Backend("new audio buffer is unexpectedly shared".to_owned())
             })?;
@@ -3404,6 +3422,35 @@ mod tests {
         );
         assert!(origin.timing(first_timestamp, 1_918, 48_000, 2).is_err());
         assert!(PcmClockOrigin::new(0, u64::MAX, 1).is_err());
+    }
+
+    #[test]
+    fn late_pcm_reanchors_to_live_pipeline_time_instead_of_falling_behind() {
+        let (origin, pts, _) =
+            PcmClockOrigin::schedule(None, 0, 1_000_000_000, 200, 1_920, 48_000, 2)
+                .expect("first PCM frame");
+        assert_eq!(pts, 1_200_000_000);
+        let (same, pts, _) =
+            PcmClockOrigin::schedule(Some(origin), 480, 1_100_000_000, 200, 1_920, 48_000, 2)
+                .expect("on-time PCM frame");
+        assert_eq!(same, origin);
+        assert_eq!(pts, 1_210_000_000);
+        let (reanchored, pts, _) =
+            PcmClockOrigin::schedule(Some(origin), 960, 5_000_000_000, 200, 1_920, 48_000, 2)
+                .expect("PCM frame after a gap");
+        assert_ne!(reanchored, origin);
+        assert_eq!(pts, 5_200_000_000);
+        let (_, pts, _) = PcmClockOrigin::schedule(
+            Some(reanchored),
+            1_440,
+            5_005_000_000,
+            200,
+            1_920,
+            48_000,
+            2,
+        )
+        .expect("PCM frame continuing after re-anchor");
+        assert_eq!(pts, 5_210_000_000);
     }
 
     #[test]

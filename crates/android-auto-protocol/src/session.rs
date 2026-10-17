@@ -27,7 +27,8 @@ use crate::{
         MicrophoneResponse, Ping, SensorRequest, ServiceDiscoveryRequest, Setup, ShutdownRequest,
         Start, TouchPointMessage, VideoFocusNotification, VoiceSessionNotification, ack,
         auth_complete, decode, input_key, input_rotary, input_touch,
-        service_discovery_payload_with_density, setup_ok, status_ok, validate_head_unit_name,
+        service_discovery_payload_with_density, setup_ok, setup_ok_with_window, status_ok,
+        validate_head_unit_name,
     },
     tls::{AapTls, split_tls_records},
 };
@@ -38,6 +39,7 @@ const VIDEO_WIDTH: u32 = 800;
 const VIDEO_HEIGHT: u32 = 480;
 const MICROPHONE_SESSION_ID: i32 = 1;
 const MAX_MIC_WINDOW: usize = 16;
+const AUDIO_MAX_UNACKED: u32 = 4;
 const READ_BUFFER_LIMIT: usize = 64 * 1024;
 const MAX_ACTIVE_TLS_REASSEMBLIES: usize = 16;
 
@@ -1310,7 +1312,7 @@ impl<T: Read + Write + Send> Session<T> {
                     channel_id,
                     FLAG_ENCRYPTED_SIGNAL,
                     message::AV_SETUP_RESPONSE,
-                    &setup_ok(),
+                    &setup_ok_with_window(AUDIO_MAX_UNACKED),
                 )?;
                 Ok(Vec::new())
             }
@@ -2614,7 +2616,13 @@ mod tests {
         session
             .ingest_at(&audio_setup, now + Duration::from_millis(5))
             .expect("audio setup");
-        let _ = drain_hu_messages(&mut session, &mut phone);
+        let audio_setup_response = drain_hu_messages(&mut session, &mut phone)
+            .into_iter()
+            .find(|(_, message_id, _)| *message_id == message::AV_SETUP_RESPONSE)
+            .expect("audio setup response");
+        let audio_setup_response: crate::proto::SetupResponse =
+            decode("audio setup response", &audio_setup_response.2).expect("setup response proto");
+        assert_eq!(audio_setup_response.max_unacked, Some(AUDIO_MAX_UNACKED));
         let audio_start = phone.encrypted_frames(
             channel::MEDIA_AUDIO,
             message::AV_START,
