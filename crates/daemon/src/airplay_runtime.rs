@@ -2489,7 +2489,10 @@ fn build_info_payload(
     info.insert("rightHandDrive".to_owned(), Value::Boolean(false));
     info.insert("keepAliveLowPower".to_owned(), Value::Boolean(true));
     info.insert("keepAliveSendStatsAsBody".to_owned(), Value::Boolean(false));
-    info.insert("modes".to_owned(), Value::Dictionary(info_modes()));
+    info.insert(
+        "modes".to_owned(),
+        Value::Dictionary(info_modes(media.audio)),
+    );
     info.insert(
         "extendedFeatures".to_owned(),
         Value::Array(vec![
@@ -2590,7 +2593,7 @@ fn required_identity<'a>(value: &'a Option<String>, field: &str) -> Result<&'a s
         .ok_or_else(|| format!("AirPlay /info requires a factual {field}"))
 }
 
-fn info_modes() -> Dictionary {
+fn info_modes(audio: bool) -> Dictionary {
     let resource = |resource_id| {
         let mut resource = Dictionary::new();
         resource.insert("resourceID".to_owned(), Value::from(resource_id));
@@ -2610,11 +2613,12 @@ fn info_modes() -> Dictionary {
     let mut turn_by_turn = Dictionary::new();
     turn_by_turn.insert("appStateID".to_owned(), Value::from(3_u64));
     turn_by_turn.insert("state".to_owned(), Value::Boolean(false));
+    let mut resources = vec![resource(1_u64)];
+    if audio {
+        resources.push(resource(2_u64));
+    }
     let mut modes = Dictionary::new();
-    modes.insert(
-        "resources".to_owned(),
-        Value::Array(vec![resource(1_u64), resource(2_u64)]),
-    );
+    modes.insert("resources".to_owned(), Value::Array(resources));
     modes.insert(
         "appStates".to_owned(),
         Value::Array(vec![
@@ -3607,6 +3611,22 @@ mod tests {
         assert!(!decoded.contains_key("audioFormats"));
         assert!(!decoded.contains_key("audioLatencies"));
         assert!(decoded.contains_key("displays"));
+        let resources = decoded
+            .get("modes")
+            .and_then(Value::as_dictionary)
+            .and_then(|modes| modes.get("resources"))
+            .and_then(Value::as_array)
+            .expect("mode resources")
+            .iter()
+            .map(|resource| {
+                resource
+                    .as_dictionary()
+                    .and_then(|resource| resource.get("resourceID"))
+                    .and_then(Value::as_unsigned_integer)
+                    .expect("resource ID")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(resources, [1], "main audio must stay with the phone");
 
         let progress = initial_airplay_progress(advertised, true);
         assert!(progress.media_ready, "screen backend remains available");

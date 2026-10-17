@@ -29,7 +29,7 @@
       "originYPixels": 0
     }
   },
-  "resourceIDs": [1, 2],
+  "resourceIDs": [1],
   "hidUUIDs": ["2a2a2a2a", "2a2a2a2b", "2a2a2a2c", "2a2a2a2d"],
   "audioFormatsPresent": false,
   "audioLatenciesPresent": false
