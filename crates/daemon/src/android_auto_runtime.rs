@@ -94,6 +94,7 @@ const CALL_MICROPHONE_RATE: u32 = 8_000;
 const SYSTEM_CLOCK: usize = 2;
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
 const BLUETOOTH_PASSKEY_WAIT: Duration = Duration::from_secs(60);
+const BLUETOOTH_READY_WAIT: Duration = Duration::from_secs(8);
 const TEST_TONE_TIMEOUT: Duration = Duration::from_secs(2);
 pub const MAX_ANDROID_AUTO_WORKER_STOP_WAIT: Duration = Duration::from_secs(5);
 const WORKER_STOP_POLL: Duration = Duration::from_millis(10);
@@ -2576,7 +2577,9 @@ fn run_protocol<T: std::io::Read + std::io::Write + Send>(
     let bluetooth_address = hands_free
         .as_ref()
         .filter(|_| audio_output)
-        .and_then(HandsFree::car_address);
+        .and_then(|hands_free| {
+            hands_free.wait_for_car_address(BLUETOOTH_READY_WAIT, || shutdown.is_requested())
+        });
     if let Some(address) = &bluetooth_address {
         tracing::info!(address, "offering Bluetooth hands-free calls to the phone");
     }
@@ -2604,7 +2607,7 @@ fn run_protocol<T: std::io::Read + std::io::Write + Send>(
     let mut pending_voice_session = None;
     let mut pending_microphone = None;
     let mut first_video = None;
-    let mut pairing_phone: Option<(String, Instant)> = None;
+    let mut pairing_phone: Option<(String, Instant, bool)> = None;
     let session_result = (|| {
         while session.is_alive() {
             if shutdown.is_requested() && !shutdown_started {
@@ -2697,9 +2700,24 @@ fn run_protocol<T: std::io::Read + std::io::Write + Send>(
                         session.answer_bluetooth_pairing(paired).map_err(|error| {
                             format!("answering the Bluetooth pairing request failed: {error}")
                         })?;
-                        pairing_phone = phone_address
-                            .filter(|_| !paired)
-                            .map(|address| (address, Instant::now() + BLUETOOTH_PASSKEY_WAIT));
+                        if let Some((address, hands_free)) =
+                            phone_address.as_deref().zip(hands_free.as_ref())
+                        {
+                            hands_free.remember_phone(address);
+                        }
+                        if paired
+                            && let Some((address, hands_free)) =
+                                phone_address.as_deref().zip(hands_free.as_ref())
+                            && hands_free.connect_phone(address)
+                        {
+                            tracing::info!(
+                                phone = address,
+                                "connecting Bluetooth hands-free to the paired phone"
+                            );
+                        }
+                        pairing_phone = phone_address.map(|address| {
+                            (address, Instant::now() + BLUETOOTH_PASSKEY_WAIT, paired)
+                        });
                     }
                     Event::BluetoothAuthenticated { status } => {
                         tracing::info!(?status, "the phone finished Bluetooth pairing for calls");
@@ -2721,7 +2739,7 @@ fn run_protocol<T: std::io::Read + std::io::Write + Send>(
                     }
                 }
             }
-            if let Some((address, deadline)) = pairing_phone.take() {
+            if let Some((address, deadline, paired)) = pairing_phone.take() {
                 match hands_free
                     .as_ref()
                     .and_then(|hands_free| hands_free.take_passkey(&address))
@@ -2736,8 +2754,9 @@ fn run_protocol<T: std::io::Read + std::io::Write + Send>(
                         })?;
                     }
                     None if Instant::now() < deadline => {
-                        pairing_phone = Some((address, deadline));
+                        pairing_phone = Some((address, deadline, paired));
                     }
+                    None if paired => {}
                     None => tracing::warn!(
                         phone = address,
                         "the phone never started Bluetooth pairing with Prelude"

@@ -3,19 +3,26 @@
     allow(dead_code)
 )]
 
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
-    mpsc::{self, Receiver, SyncSender, TrySendError},
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc::{self, Receiver, SyncSender, TrySendError},
+    },
+    thread,
+    time::{Duration, Instant},
 };
 
 use prelude_bluetooth_sco::ScoLink;
-use prelude_wireless::bluez::PairingPasskeys;
+use prelude_wireless::bluez::{PairingPasskeys, PhoneKind};
 
-use crate::wireless_runtime::{SharedBluetoothAddress, SharedBluetoothControl};
+use crate::wireless_runtime::{SharedBluetoothAddress, SharedBluetoothControl, remember_phone};
 
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
 pub(crate) use bridge::CallBridge;
+
+const CAR_ADDRESS_POLL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Default)]
 struct CallListeners {
@@ -28,8 +35,10 @@ pub(crate) struct HandsFree {
     address: SharedBluetoothAddress,
     control: SharedBluetoothControl,
     passkeys: PairingPasskeys,
+    state_dir: PathBuf,
     listeners: Arc<Mutex<CallListeners>>,
     usb_sessions: Arc<AtomicUsize>,
+    expected: Arc<AtomicBool>,
 }
 
 #[derive(Debug)]
@@ -48,13 +57,37 @@ impl HandsFree {
         address: SharedBluetoothAddress,
         control: SharedBluetoothControl,
         passkeys: PairingPasskeys,
+        state_dir: PathBuf,
     ) -> Self {
         Self {
             address,
             control,
             passkeys,
+            state_dir,
             listeners: Arc::default(),
             usb_sessions: Arc::default(),
+            expected: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
+    pub(crate) fn set_bluetooth_expected(&self, expected: bool) {
+        self.expected.store(expected, Ordering::Release);
+    }
+
+    pub(crate) fn wait_for_car_address(
+        &self,
+        timeout: Duration,
+        cancelled: impl Fn() -> bool,
+    ) -> Option<String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(address) = self.car_address() {
+                return Some(address);
+            }
+            if !self.expected.load(Ordering::Acquire) || cancelled() || Instant::now() >= deadline {
+                return None;
+            }
+            thread::sleep(CAR_ADDRESS_POLL);
         }
     }
 
@@ -86,6 +119,32 @@ impl HandsFree {
         let address = parse_address(phone_address)?;
         let control = self.control.read().ok()?.clone()?;
         control.is_paired(&format_address(address))
+    }
+
+    pub(crate) fn remember_phone(&self, phone_address: &str) {
+        let Some(address) = parse_address(phone_address) else {
+            return;
+        };
+        let address = format_address(address);
+        if let Err(error) = remember_phone(
+            &self.state_dir,
+            &self.control,
+            PhoneKind::AndroidAuto,
+            &address,
+        ) {
+            tracing::warn!(phone = address, %error, "remembering the hands-free phone failed");
+        }
+    }
+
+    pub(crate) fn connect_phone(&self, phone_address: &str) -> bool {
+        let Some(address) = parse_address(phone_address) else {
+            return false;
+        };
+        let Some(control) = self.control.read().ok().and_then(|control| control.clone()) else {
+            return false;
+        };
+        control.connect(&format_address(address), PhoneKind::AndroidAuto);
+        true
     }
 
     pub(crate) fn offer_call(&self, link: ScoLink) {
@@ -435,13 +494,19 @@ mod tests {
     fn the_car_address_is_only_offered_while_bluetooth_runs() {
         let address = Arc::new(RwLock::new(Some([0x30, 0xe3, 0xd6, 0x03, 0x96, 0x1e])));
         let control = Arc::new(RwLock::new(None));
-        let hands_free = HandsFree::new(address, control, PairingPasskeys::default());
+        let hands_free =
+            HandsFree::new(address, control, PairingPasskeys::default(), PathBuf::new());
         assert_eq!(hands_free.car_address(), None);
     }
 
     #[test]
     fn a_dropped_subscription_releases_only_its_own_slot() {
-        let hands_free = HandsFree::new(Arc::default(), Arc::default(), PairingPasskeys::default());
+        let hands_free = HandsFree::new(
+            Arc::default(),
+            Arc::default(),
+            PairingPasskeys::default(),
+            PathBuf::new(),
+        );
         let first = hands_free.subscribe();
         let second = hands_free.subscribe();
         drop(first);
@@ -465,8 +530,34 @@ mod tests {
     }
 
     #[test]
+    fn waiting_for_bluetooth_stops_when_it_is_not_expected_or_cancelled() {
+        let hands_free = HandsFree::new(
+            Arc::default(),
+            Arc::default(),
+            PairingPasskeys::default(),
+            PathBuf::new(),
+        );
+        let started = Instant::now();
+        assert_eq!(
+            hands_free.wait_for_car_address(Duration::from_secs(5), || true),
+            None
+        );
+        hands_free.set_bluetooth_expected(false);
+        assert_eq!(
+            hands_free.wait_for_car_address(Duration::from_secs(5), || false),
+            None
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
     fn usb_projection_lasts_until_every_session_ends() {
-        let hands_free = HandsFree::new(Arc::default(), Arc::default(), PairingPasskeys::default());
+        let hands_free = HandsFree::new(
+            Arc::default(),
+            Arc::default(),
+            PairingPasskeys::default(),
+            PathBuf::new(),
+        );
         assert!(!hands_free.projecting_over_usb());
         let first = hands_free.usb_session();
         let second = hands_free.clone().usb_session();

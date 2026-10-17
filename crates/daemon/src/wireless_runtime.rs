@@ -36,6 +36,7 @@ const SUPERVISOR_POLL: Duration = Duration::from_millis(100);
 const ACCESS_POINT_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const ACCESS_POINT_RETRY: Duration = Duration::from_secs(5);
 const BLUETOOTH_RETRY: Duration = Duration::from_secs(5);
+const BLUETOOTH_START_RETRY: Duration = Duration::from_secs(1);
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(20);
 const FOCUS_WINDOW: Duration = Duration::from_secs(60);
@@ -483,13 +484,14 @@ impl WirelessService {
         let phone_audio = Arc::new(AtomicBool::new(config.android_auto.disable_audio_output));
         let wifi_present = Arc::new(AtomicBool::new(wifi_interface(wireless).is_some()));
         let passkeys = PairingPasskeys::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        let state_dir = wireless_state_dir(&config.state_dir);
         let hands_free = HandsFree::new(
             Arc::clone(&bluetooth_address),
             Arc::clone(&bluetooth_control),
             passkeys.clone(),
+            state_dir.clone(),
         );
-        let stop = Arc::new(AtomicBool::new(false));
-        let state_dir = wireless_state_dir(&config.state_dir);
         let directory = WirelessPhoneDirectory {
             state_dir: state_dir.clone(),
             android_auto: android_auto.clone(),
@@ -1035,7 +1037,9 @@ enum BluetoothMode {
 impl BluetoothDispatch {
     fn run(&self, base: &BluetoothConfig) {
         while !self.stop.load(Ordering::Relaxed) {
-            let Some(mode) = self.mode() else {
+            let mode = self.mode();
+            self.hands_free.set_bluetooth_expected(mode.is_some());
+            let Some(mode) = mode else {
                 self.power_off_while_unneeded(&base.adapter);
                 continue;
             };
@@ -1045,7 +1049,7 @@ impl BluetoothDispatch {
                     Ok(started) => started,
                     Err(error) => {
                         tracing::warn!(%error, "Bluetooth is not ready; retrying");
-                        sleep_unless_stopped(&self.stop, BLUETOOTH_RETRY);
+                        sleep_unless_stopped(&self.stop, BLUETOOTH_START_RETRY);
                         continue;
                     }
                 };
@@ -1061,7 +1065,7 @@ impl BluetoothDispatch {
                 && self.mode() == Some(mode)
             {
                 match incoming.recv_timeout(Duration::from_millis(500)) {
-                    Ok(connection) => self.accept(connection),
+                    Ok(connection) => self.accept(connection, mode),
                     Err(RecvTimeoutError::Timeout) => {}
                     Err(RecvTimeoutError::Disconnected) => break,
                 }
@@ -1167,7 +1171,10 @@ impl BluetoothDispatch {
         }
         let enabled = match phone.kind {
             PhoneKind::CarPlay => self.wireless.carplay && mode == BluetoothMode::Projection,
-            PhoneKind::AndroidAuto => self.wireless.android_auto,
+            PhoneKind::AndroidAuto => {
+                self.wireless.android_auto
+                    && (mode == BluetoothMode::Projection || self.hands_free.projecting_over_usb())
+            }
         };
         if enabled {
             tracing::debug!(
@@ -1179,7 +1186,7 @@ impl BluetoothDispatch {
         }
     }
 
-    fn accept(&self, connection: RfcommConnection) {
+    fn accept(&self, connection: RfcommConnection, mode: BluetoothMode) {
         let peer = connection.peer.clone();
         if let Err(error) = connection
             .set_read_timeout(Some(wpp::poll_interval()))
@@ -1227,6 +1234,7 @@ impl BluetoothDispatch {
             bluetooth_control: Arc::clone(&self.bluetooth_control),
             android_auto_peer: Arc::clone(&self.android_auto_peer),
             hands_free: self.hands_free.clone(),
+            calls_need_usb: mode == BluetoothMode::HandsFreeOnly,
             state_dir: self.state_dir.clone(),
         };
         let stop = Arc::clone(&self.stop);
@@ -1248,14 +1256,16 @@ struct RfcommLinks {
     bluetooth_control: SharedBluetoothControl,
     android_auto_peer: SharedPeer,
     hands_free: HandsFree,
+    calls_need_usb: bool,
     state_dir: PathBuf,
 }
 
 impl RfcommLinks {
     fn keeps_calls_on_phone(&self, peer: &str) -> bool {
-        self.phone_audio.load(Ordering::Relaxed)
+        let projecting = self.phone_audio.load(Ordering::Relaxed)
             && active_peer(&self.carplay, &self.android_auto, &self.android_auto_peer).as_deref()
-                == Some(peer)
+                == Some(peer);
+        projecting || (self.calls_need_usb && !self.hands_free.projecting_over_usb())
     }
 }
 
