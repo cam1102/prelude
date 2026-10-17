@@ -23,12 +23,13 @@ use crate::{
         FrameDecoder, MessageAssembler, PhysicalFrame, encode_encrypted_frame, encode_plain_frame,
     },
     proto::{
-        Ack, AudioFocusRequest, BatteryStatusNotification, ChannelOpenRequest, MicrophoneRequest,
-        MicrophoneResponse, Ping, SensorRequest, ServiceDiscoveryRequest, Setup, ShutdownRequest,
-        Start, TouchPointMessage, VideoFocusNotification, VoiceSessionNotification, ack,
-        auth_complete, decode, input_key, input_rotary, input_touch,
-        service_discovery_payload_with_density, setup_ok, setup_ok_with_window, status_ok,
-        validate_head_unit_name,
+        Ack, AudioFocusRequest, BatteryStatusNotification, BluetoothAuthenticationResult,
+        BluetoothPairingRequest, ChannelOpenRequest, MicrophoneRequest, MicrophoneResponse, Ping,
+        SensorRequest, ServiceDiscoveryRequest, Setup, ShutdownRequest, Start, TouchPointMessage,
+        VideoFocusNotification, VoiceSessionNotification, ack, auth_complete,
+        bluetooth_authentication, bluetooth_pairing_response, decode, input_key, input_rotary,
+        input_touch, service_discovery_payload_with_density, setup_ok, setup_ok_with_window,
+        status_ok, validate_bluetooth_address, validate_head_unit_name,
     },
     tls::{AapTls, split_tls_records},
 };
@@ -42,6 +43,7 @@ const MAX_MIC_WINDOW: usize = 16;
 const AUDIO_MAX_UNACKED: u32 = 4;
 const READ_BUFFER_LIMIT: usize = 64 * 1024;
 const MAX_ACTIVE_TLS_REASSEMBLIES: usize = 16;
+const MAX_PHONE_ADDRESS_BYTES: usize = 32;
 
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
@@ -54,6 +56,7 @@ pub struct SessionConfig {
     pub shutdown_timeout: Duration,
     pub initial_night_mode: bool,
     pub audio_output: bool,
+    pub bluetooth_address: Option<String>,
 }
 
 impl Default for SessionConfig {
@@ -68,6 +71,7 @@ impl Default for SessionConfig {
             shutdown_timeout: Duration::from_secs(1),
             initial_night_mode: false,
             audio_output: true,
+            bluetooth_address: None,
         }
     }
 }
@@ -75,6 +79,9 @@ impl Default for SessionConfig {
 impl SessionConfig {
     fn validate(&self) -> Result<()> {
         validate_head_unit_name(&self.head_unit_name)?;
+        if let Some(address) = &self.bluetooth_address {
+            validate_bluetooth_address(address)?;
+        }
         if !(MIN_VIDEO_DENSITY_DPI..=MAX_VIDEO_DENSITY_DPI).contains(&self.video_density_dpi) {
             return Err(Error::InvalidMessage(
                 "video density is outside the supported range",
@@ -169,6 +176,12 @@ pub enum Event {
         level: u32,
         critical: bool,
         time_remaining_seconds: Option<u32>,
+    },
+    BluetoothPairing {
+        phone_address: Option<String>,
+    },
+    BluetoothAuthenticated {
+        status: Option<i32>,
     },
 }
 
@@ -469,6 +482,7 @@ pub struct Session<T> {
     microphone_unacked: usize,
     microphone_queue: VecDeque<QueuedMicrophoneFrame>,
     night_mode: Option<bool>,
+    bluetooth_pairing_pending: bool,
     disconnected_emitted: bool,
     trace: SessionTrace,
 }
@@ -508,6 +522,7 @@ impl<T: Read + Write + Send> Session<T> {
             microphone_unacked: 0,
             microphone_queue: VecDeque::new(),
             night_mode: None,
+            bluetooth_pairing_pending: false,
             disconnected_emitted: false,
             trace: SessionTrace::default(),
         })
@@ -662,6 +677,35 @@ impl<T: Read + Write + Send> Session<T> {
         )?;
         self.night_mode = Some(enabled);
         Ok(true)
+    }
+
+    pub fn answer_bluetooth_pairing(&mut self, already_paired: bool) -> Result<()> {
+        if !self.bluetooth_pairing_pending {
+            return Err(Error::InvalidState {
+                operation: "answering a Bluetooth pairing request the phone never sent",
+            });
+        }
+        self.bluetooth_pairing_pending = false;
+        self.send_encrypted(
+            channel::BLUETOOTH,
+            FLAG_ENCRYPTED_SIGNAL,
+            message::BLUETOOTH_PAIRING_RESPONSE,
+            &bluetooth_pairing_response(already_paired),
+        )
+    }
+
+    pub fn send_bluetooth_passkey(&mut self, passkey: u32) -> Result<()> {
+        if self.config.bluetooth_address.is_none() {
+            return Err(Error::InvalidState {
+                operation: "sending a Bluetooth passkey without advertising Bluetooth",
+            });
+        }
+        self.send_encrypted(
+            channel::BLUETOOTH,
+            FLAG_ENCRYPTED_SIGNAL,
+            message::BLUETOOTH_AUTHENTICATION_DATA,
+            &bluetooth_authentication(passkey),
+        )
     }
 
     pub fn send_at(&mut self, command: Command, now: Instant) -> Result<()> {
@@ -966,7 +1010,7 @@ impl<T: Read + Write + Send> Session<T> {
             return self.handle_control(message_id, payload, now);
         }
         if message_id == message::CHANNEL_OPEN_REQUEST {
-            if !channel::advertised(channel_id, self.config.audio_output) {
+            if !self.advertises(channel_id) {
                 return Err(Error::InvalidMessage(
                     "phone opened an unadvertised channel",
                 ));
@@ -988,10 +1032,21 @@ impl<T: Read + Write + Send> Session<T> {
             }
             channel::INPUT => self.handle_input(message_id),
             channel::MICROPHONE => self.handle_microphone(message_id, payload),
+            channel::BLUETOOTH if self.config.bluetooth_address.is_some() => {
+                self.handle_bluetooth(message_id, payload)
+            }
             _ => Err(Error::InvalidMessage(
                 "message is on an unadvertised channel",
             )),
         }
+    }
+
+    fn advertises(&self, channel_id: u8) -> bool {
+        channel::advertised(
+            channel_id,
+            self.config.audio_output,
+            self.config.bluetooth_address.is_some(),
+        )
     }
 
     fn handle_control(
@@ -1018,6 +1073,7 @@ impl<T: Read + Write + Send> Session<T> {
                         &self.config.head_unit_name,
                         self.config.video_density_dpi,
                         self.config.audio_output,
+                        self.config.bluetooth_address.as_deref(),
                     )?,
                 )?;
                 self.state = SessionState::ChannelSetup;
@@ -1034,7 +1090,7 @@ impl<T: Read + Write + Send> Session<T> {
                 ))?;
                 let channel_id = u8::try_from(service_id)
                     .map_err(|_| Error::InvalidMessage("channel ID is outside the wire range"))?;
-                if !channel::advertised(channel_id, self.config.audio_output) {
+                if !self.advertises(channel_id) {
                     return Err(Error::InvalidMessage(
                         "phone opened an unadvertised channel",
                     ));
@@ -1359,6 +1415,25 @@ impl<T: Read + Write + Send> Session<T> {
             &status_ok(),
         )?;
         Ok(Vec::new())
+    }
+
+    fn handle_bluetooth(&mut self, message_id: u16, payload: &[u8]) -> Result<Vec<Event>> {
+        if message_id == message::BLUETOOTH_AUTHENTICATION_RESULT {
+            let result: BluetoothAuthenticationResult =
+                decode("Bluetooth authentication result", payload)?;
+            return Ok(vec![Event::BluetoothAuthenticated {
+                status: result.status,
+            }]);
+        }
+        if message_id != message::BLUETOOTH_PAIRING_REQUEST {
+            return Ok(Vec::new());
+        }
+        let request: BluetoothPairingRequest = decode("Bluetooth pairing request", payload)?;
+        let phone_address = request
+            .phone_address
+            .filter(|address| address.len() <= MAX_PHONE_ADDRESS_BYTES);
+        self.bluetooth_pairing_pending = true;
+        Ok(vec![Event::BluetoothPairing { phone_address }])
     }
 
     fn handle_microphone(&mut self, message_id: u16, payload: &[u8]) -> Result<Vec<Event>> {
@@ -2486,6 +2561,113 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn bluetooth_pairing_requests_are_answered_with_the_bond_state() {
+        let (mut session, mut phone, now) = discovered_session();
+        session.config.bluetooth_address = Some("30:E3:D6:03:96:1E".to_owned());
+        drain_hu_messages(&mut session, &mut phone);
+        let open = phone.encrypted_frames(
+            channel::CONTROL,
+            message::CHANNEL_OPEN_REQUEST,
+            &ChannelOpenRequest {
+                priority: Some(0),
+                service_id: Some(i32::from(channel::BLUETOOTH)),
+            }
+            .encode_to_vec(),
+        );
+        session
+            .ingest_at(&open, now + Duration::from_millis(2))
+            .expect("Bluetooth channel open");
+        drain_hu_messages(&mut session, &mut phone);
+        let request = phone.encrypted_frames(
+            channel::BLUETOOTH,
+            message::BLUETOOTH_PAIRING_REQUEST,
+            &BluetoothPairingRequest {
+                phone_address: Some("F0:5C:77:12:34:56".to_owned()),
+                pairing_method: Some(2),
+            }
+            .encode_to_vec(),
+        );
+        let events = session
+            .ingest_at(&request, now + Duration::from_millis(3))
+            .expect("pairing request");
+        assert!(matches!(
+            events.as_slice(),
+            [Event::BluetoothPairing { phone_address: Some(address) }] if address == "F0:5C:77:12:34:56"
+        ));
+        assert!(
+            drain_hu_messages(&mut session, &mut phone)
+                .iter()
+                .all(|(channel_id, _, _)| *channel_id != channel::BLUETOOTH)
+        );
+        session.answer_bluetooth_pairing(false).expect("answer");
+        assert!(session.answer_bluetooth_pairing(false).is_err());
+        session.send_bluetooth_passkey(4_217).expect("passkey");
+        let messages = drain_hu_messages(&mut session, &mut phone);
+        let response = messages
+            .iter()
+            .find(|(channel_id, message_id, _)| {
+                *channel_id == channel::BLUETOOTH
+                    && *message_id == message::BLUETOOTH_PAIRING_RESPONSE
+            })
+            .expect("pairing response");
+        let response: crate::proto::BluetoothPairingResponse =
+            decode("pairing response", &response.2).expect("response");
+        assert_eq!(response.status, STATUS_OK);
+        assert!(!response.already_paired);
+        let authentication = messages
+            .iter()
+            .find(|(channel_id, message_id, _)| {
+                *channel_id == channel::BLUETOOTH
+                    && *message_id == message::BLUETOOTH_AUTHENTICATION_DATA
+            })
+            .expect("authentication data");
+        let authentication: crate::proto::BluetoothAuthenticationData =
+            decode("authentication data", &authentication.2).expect("authentication");
+        assert_eq!(authentication.auth_data, "004217");
+        let result = phone.encrypted_frames(
+            channel::BLUETOOTH,
+            message::BLUETOOTH_AUTHENTICATION_RESULT,
+            &BluetoothAuthenticationResult { status: Some(0) }.encode_to_vec(),
+        );
+        let events = session
+            .ingest_at(&result, now + Duration::from_millis(4))
+            .expect("authentication result");
+        assert!(matches!(
+            events.as_slice(),
+            [Event::BluetoothAuthenticated { status: Some(0) }]
+        ));
+    }
+
+    #[test]
+    fn bluetooth_channel_is_rejected_without_a_car_address() {
+        let (mut session, mut phone, now) = discovered_session();
+        drain_hu_messages(&mut session, &mut phone);
+        let open = phone.encrypted_frames(
+            channel::CONTROL,
+            message::CHANNEL_OPEN_REQUEST,
+            &ChannelOpenRequest {
+                priority: Some(0),
+                service_id: Some(i32::from(channel::BLUETOOTH)),
+            }
+            .encode_to_vec(),
+        );
+        assert!(
+            session
+                .ingest_at(&open, now + Duration::from_millis(2))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn session_config_rejects_malformed_bluetooth_addresses() {
+        let config = SessionConfig {
+            bluetooth_address: Some("not-an-address".to_owned()),
+            ..SessionConfig::default()
+        };
+        assert!(Session::new(MemoryTransport::default(), config).is_err());
     }
 
     #[test]

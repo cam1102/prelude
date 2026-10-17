@@ -4,7 +4,7 @@ use std::{
     io::{self, Read, Write},
     os::{fd::OwnedFd, unix::net::UnixStream},
     pin::Pin,
-    sync::mpsc,
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::Duration,
 };
@@ -32,6 +32,10 @@ const ANDROID_AUTO_CHANNEL: u16 = 8;
 const ADAPTER_WAIT: Duration = Duration::from_secs(30);
 const ADAPTER_POLL: Duration = Duration::from_millis(250);
 const NAME_TIMEOUT: Duration = Duration::from_secs(2);
+const HCITOOL: &str = "/usr/bin/hcitool";
+const HCI_COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
+const BCM_ROUTE_SCO_OVER_TRANSPORT: [&str; 7] =
+    ["0x3f", "0x1c", "0x01", "0x02", "0x00", "0x01", "0x01"];
 
 const AGENT_PATH: &str = "/com/usenocturne/prelude/agent";
 const ANDROID_AUTO_PATH: &str = "/com/usenocturne/prelude/android_auto";
@@ -94,6 +98,8 @@ pub struct BluetoothConfig {
     pub adapter: String,
     pub alias: String,
     pub discoverable: bool,
+    pub pairable: bool,
+    pub projection: bool,
     pub android_auto: bool,
     pub carplay: bool,
 }
@@ -144,6 +150,28 @@ impl Write for RfcommConnection {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct PairingPasskeys(Arc<Mutex<Option<(String, u32)>>>);
+
+impl PairingPasskeys {
+    fn record(&self, peer: String, passkey: u32) {
+        if let Ok(mut latest) = self.0.lock() {
+            *latest = Some((peer, passkey));
+        }
+    }
+
+    pub fn take(&self, peer: &str) -> Option<u32> {
+        let mut latest = self.0.lock().ok()?;
+        if latest
+            .as_ref()
+            .is_some_and(|(recorded, _)| recorded.eq_ignore_ascii_case(peer))
+        {
+            return latest.take().map(|(_, passkey)| passkey);
+        }
+        None
+    }
+}
+
 #[derive(Debug)]
 pub struct BluetoothService {
     address: [u8; 6],
@@ -187,6 +215,7 @@ enum DeviceCommand {
     ReleaseHandsFree(String),
     Remove(String),
     Name(String, mpsc::Sender<Option<String>>),
+    Paired(String, mpsc::Sender<bool>),
 }
 
 #[derive(Debug, Clone)]
@@ -218,10 +247,21 @@ impl BluetoothControl {
             .ok()?;
         answer.recv_timeout(NAME_TIMEOUT).ok().flatten()
     }
+
+    pub fn is_paired(&self, peer: &str) -> Option<bool> {
+        let (reply, answer) = mpsc::channel();
+        self.0
+            .send(DeviceCommand::Paired(peer.to_owned(), reply))
+            .ok()?;
+        answer.recv_timeout(NAME_TIMEOUT).ok()
+    }
 }
 
 impl BluetoothService {
-    pub fn start(config: BluetoothConfig) -> Result<(Self, mpsc::Receiver<RfcommConnection>)> {
+    pub fn start(
+        config: BluetoothConfig,
+        passkeys: PairingPasskeys,
+    ) -> Result<(Self, mpsc::Receiver<RfcommConnection>)> {
         let (connections, incoming) = mpsc::channel();
         let (ready_sender, ready) = mpsc::channel();
         let (stop, stopped) = tokio::sync::oneshot::channel();
@@ -241,7 +281,7 @@ impl BluetoothService {
                     }
                 };
                 runtime.block_on(async move {
-                    match register(&config, connections).await {
+                    match register(&config, connections, passkeys).await {
                         Ok((connection, mut watch, address)) => {
                             let _ = ready_sender.send(Ok(address));
                             let adapter_path = format!("/org/bluez/{}", config.adapter);
@@ -473,6 +513,10 @@ async fn run_device_command(connection: &Connection, adapter_path: &str, command
             let path = device_path(adapter_path, &peer);
             let _ = reply.send(device_string(connection, &path, "Alias").await);
         }
+        DeviceCommand::Paired(peer, reply) => {
+            let path = device_path(adapter_path, &peer);
+            let _ = reply.send(device_flag(connection, &path, "Paired").await);
+        }
     }
 }
 
@@ -530,11 +574,12 @@ impl Drop for BluetoothService {
 async fn register(
     config: &BluetoothConfig,
     connections: mpsc::Sender<RfcommConnection>,
+    passkeys: PairingPasskeys,
 ) -> Result<(Connection, BluezWatch, [u8; 6])> {
     let connection = Connection::system().await?;
     let registered = async {
         let watch = BluezWatch::subscribe(&connection).await?;
-        let address = register_on(&connection, config, connections).await?;
+        let address = register_on(&connection, config, connections, passkeys).await?;
         Ok((watch, address))
     };
     match registered.await {
@@ -550,6 +595,7 @@ async fn register_on(
     connection: &Connection,
     config: &BluetoothConfig,
     connections: mpsc::Sender<RfcommConnection>,
+    passkeys: PairingPasskeys,
 ) -> Result<[u8; 6]> {
     let adapter_path = format!("/org/bluez/{}", config.adapter);
     let address = wait_for_adapter(connection, &adapter_path).await?;
@@ -565,6 +611,7 @@ async fn register_on(
             AGENT_PATH,
             Agent {
                 connection: connection.clone(),
+                passkeys,
             },
         )
         .await?;
@@ -573,7 +620,7 @@ async fn register_on(
         "/org/bluez",
         "org.bluez.AgentManager1",
         "RegisterAgent",
-        &(ObjectPath::try_from(AGENT_PATH)?, "NoInputNoOutput"),
+        &(ObjectPath::try_from(AGENT_PATH)?, "DisplayYesNo"),
     )
     .await?;
     call(
@@ -586,16 +633,18 @@ async fn register_on(
     .await?;
 
     if config.android_auto {
-        server
-            .at(ANDROID_AUTO_PATH, profile(RfcommProfile::AndroidAuto))
+        if config.projection {
+            server
+                .at(ANDROID_AUTO_PATH, profile(RfcommProfile::AndroidAuto))
+                .await?;
+            register_profile(
+                connection,
+                ANDROID_AUTO_PATH,
+                ANDROID_AUTO_RFCOMM_UUID,
+                server_options(ANDROID_AUTO_CHANNEL, ANDROID_AUTO_RECORD),
+            )
             .await?;
-        register_profile(
-            connection,
-            ANDROID_AUTO_PATH,
-            ANDROID_AUTO_RFCOMM_UUID,
-            server_options(ANDROID_AUTO_CHANNEL, ANDROID_AUTO_RECORD),
-        )
-        .await?;
+        }
         server
             .at(HANDS_FREE_PATH, profile(RfcommProfile::HandsFree))
             .await?;
@@ -605,7 +654,7 @@ async fn register_on(
         options.insert("RequireAuthentication", Value::from(true));
         register_profile(connection, HANDS_FREE_PATH, HANDS_FREE_UUID, options).await?;
     }
-    if config.carplay {
+    if config.carplay && config.projection {
         server.at(IAP2_PATH, profile(RfcommProfile::Iap2)).await?;
         register_profile(
             connection,
@@ -649,6 +698,17 @@ async fn register_on(
         Value::from(true),
     )
     .await?;
+    if let Err(error) = set_property(
+        connection,
+        &adapter_path,
+        "org.bluez.Adapter1",
+        "Connectable",
+        Value::from(true),
+    )
+    .await
+    {
+        tracing::debug!(%error, "BlueZ did not accept the Connectable property");
+    }
     set_property(
         connection,
         &adapter_path,
@@ -662,7 +722,7 @@ async fn register_on(
         &adapter_path,
         "org.bluez.Adapter1",
         "Pairable",
-        Value::from(config.discoverable),
+        Value::from(config.pairable),
     )
     .await?;
     set_property(
@@ -673,14 +733,41 @@ async fn register_on(
         Value::from(config.discoverable),
     )
     .await?;
+    if config.android_auto {
+        route_sco_to_host(&config.adapter).await;
+    }
     tracing::info!(
         adapter = config.adapter,
         alias = config.alias,
+        projection = config.projection,
         android_auto = config.android_auto,
         carplay = config.carplay,
-        "Bluetooth projection profiles registered"
+        "Bluetooth profiles registered"
     );
     Ok(address)
+}
+
+async fn route_sco_to_host(adapter: &str) {
+    let status = tokio::process::Command::new(HCITOOL)
+        .args(["-i", adapter, "cmd"])
+        .args(BCM_ROUTE_SCO_OVER_TRANSPORT)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .status();
+    match tokio::time::timeout(HCI_COMMAND_TIMEOUT, status).await {
+        Ok(Ok(status)) if status.success() => {
+            tracing::info!(adapter, "routing Bluetooth call audio over HCI");
+        }
+        Ok(Ok(status)) => {
+            tracing::warn!(adapter, %status, "the controller did not route call audio over HCI");
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(adapter, %error, "running hcitool to route call audio failed");
+        }
+        Err(_) => tracing::warn!(adapter, "hcitool timed out routing call audio"),
+    }
 }
 
 fn server_options(channel: u16, record: &'static str) -> HashMap<&'static str, Value<'static>> {
@@ -839,6 +926,7 @@ impl Profile {
 
 struct Agent {
     connection: Connection,
+    passkeys: PairingPasskeys,
 }
 
 impl Agent {
@@ -875,7 +963,11 @@ impl Agent {
         ))
     }
 
-    async fn display_passkey(&self, _device: ObjectPath<'_>, _passkey: u32, _entered: u16) {}
+    async fn display_passkey(&self, device: ObjectPath<'_>, passkey: u32, _entered: u16) {
+        if let Some(peer) = peer_address(device.as_str()) {
+            self.passkeys.record(peer, passkey);
+        }
+    }
 
     async fn request_confirmation(&self, device: ObjectPath<'_>, passkey: u32) {
         tracing::info!(
@@ -883,6 +975,9 @@ impl Agent {
             passkey,
             "accepting Bluetooth pairing"
         );
+        if let Some(peer) = peer_address(device.as_str()) {
+            self.passkeys.record(peer, passkey);
+        }
         self.trust(&device).await;
     }
 
@@ -900,6 +995,15 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn passkeys_are_handed_out_once_to_the_phone_that_paired() {
+        let passkeys = PairingPasskeys::default();
+        passkeys.record("F0:5C:77:12:34:56".to_owned(), 42);
+        assert_eq!(passkeys.take("AA:BB:CC:DD:EE:FF"), None);
+        assert_eq!(passkeys.take("f0:5c:77:12:34:56"), Some(42));
+        assert_eq!(passkeys.take("F0:5C:77:12:34:56"), None);
+    }
 
     #[test]
     fn peer_address_comes_from_the_device_path() {

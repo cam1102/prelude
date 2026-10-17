@@ -69,7 +69,7 @@ Prelude supports both wired and wireless connections.
 
 1. Plug your USB OTG adapter into the Car Thing, and plug power into the USB-C port, and the USB hub into the USB-A port. If required, plug in your USB DAC into the hub as well.
 2. Plug in your phone to the USB hub.
-3. Follow the hints on screen.
+3. Follow the hints on screen. It is normal for your phone to say "Connecting to Android Auto" for the first time. 
 
 </details>
 

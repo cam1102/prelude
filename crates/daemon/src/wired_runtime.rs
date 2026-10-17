@@ -86,6 +86,7 @@ impl SelectedRuntime {
         ambient_light: AmbientLightState,
     ) {
         if let Self::Automatic(runtime) = self {
+            runtime.attach_hands_free(wireless.hands_free());
             runtime.attach_wireless(crate::WirelessCarPlayRuntime::new(
                 config,
                 wireless,

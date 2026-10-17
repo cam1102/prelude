@@ -33,6 +33,7 @@ pub mod channel {
     pub const SYSTEM_AUDIO: u8 = 6;
     pub const INPUT: u8 = 8;
     pub const MICROPHONE: u8 = 9;
+    pub const BLUETOOTH: u8 = 10;
 
     pub const ADVERTISED: [u8; 7] = [
         SENSOR,
@@ -46,7 +47,10 @@ pub mod channel {
 
     pub const PHONE_AUDIO: [u8; 2] = [MEDIA_AUDIO, GUIDANCE_AUDIO];
 
-    pub fn advertised(channel_id: u8, audio_output: bool) -> bool {
+    pub fn advertised(channel_id: u8, audio_output: bool, bluetooth: bool) -> bool {
+        if channel_id == BLUETOOTH {
+            return bluetooth;
+        }
         ADVERTISED.contains(&channel_id) && (audio_output || !PHONE_AUDIO.contains(&channel_id))
     }
 }
@@ -93,9 +97,15 @@ pub mod message {
     pub const INPUT_REPORT: u16 = 0x8001;
     pub const KEY_BINDING_REQUEST: u16 = 0x8002;
     pub const KEY_BINDING_RESPONSE: u16 = 0x8003;
+
+    pub const BLUETOOTH_PAIRING_REQUEST: u16 = 0x8001;
+    pub const BLUETOOTH_PAIRING_RESPONSE: u16 = 0x8002;
+    pub const BLUETOOTH_AUTHENTICATION_DATA: u16 = 0x8003;
+    pub const BLUETOOTH_AUTHENTICATION_RESULT: u16 = 0x8004;
 }
 
 pub const MEDIA_CODEC_PCM: i32 = 1;
 pub const MEDIA_CODEC_H264_BASELINE: i32 = 3;
 pub const AV_SETUP_OK: i32 = 2;
 pub const STATUS_OK: i32 = 0;
+pub const BLUETOOTH_PAIRING_NUMERIC_COMPARISON: i32 = 2;

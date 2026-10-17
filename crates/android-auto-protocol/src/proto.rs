@@ -3,8 +3,8 @@ use prost::Message;
 use crate::{
     Error, Result,
     constants::{
-        AV_SETUP_OK, MAX_PROTO_PAYLOAD, MEDIA_CODEC_H264_BASELINE, MEDIA_CODEC_PCM, STATUS_OK,
-        channel,
+        AV_SETUP_OK, BLUETOOTH_PAIRING_NUMERIC_COMPARISON, MAX_PROTO_PAYLOAD,
+        MEDIA_CODEC_H264_BASELINE, MEDIA_CODEC_PCM, STATUS_OK, channel,
     },
 };
 
@@ -139,6 +139,44 @@ pub(crate) struct InputSourceService {
 }
 
 #[derive(Clone, PartialEq, Message)]
+pub(crate) struct BluetoothService {
+    #[prost(string, required, tag = "1")]
+    pub(crate) car_address: String,
+    #[prost(int32, repeated, packed = "true", tag = "2")]
+    pub(crate) supported_pairing_methods: Vec<i32>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct BluetoothPairingRequest {
+    #[prost(string, optional, tag = "1")]
+    pub(crate) phone_address: Option<String>,
+    #[prost(int32, optional, tag = "2")]
+    pub(crate) pairing_method: Option<i32>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct BluetoothPairingResponse {
+    #[prost(int32, required, tag = "1")]
+    pub(crate) status: i32,
+    #[prost(bool, required, tag = "2")]
+    pub(crate) already_paired: bool,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct BluetoothAuthenticationData {
+    #[prost(string, required, tag = "1")]
+    pub(crate) auth_data: String,
+    #[prost(int32, optional, tag = "2")]
+    pub(crate) pairing_method: Option<i32>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct BluetoothAuthenticationResult {
+    #[prost(int32, optional, tag = "1")]
+    pub(crate) status: Option<i32>,
+}
+
+#[derive(Clone, PartialEq, Message)]
 pub(crate) struct Service {
     #[prost(int32, required, tag = "1")]
     pub(crate) id: i32,
@@ -150,6 +188,8 @@ pub(crate) struct Service {
     pub(crate) input_source_service: Option<InputSourceService>,
     #[prost(message, optional, tag = "5")]
     pub(crate) media_source_service: Option<MediaSourceService>,
+    #[prost(message, optional, tag = "6")]
+    pub(crate) bluetooth_service: Option<BluetoothService>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -412,6 +452,7 @@ fn audio_sink(id: u8, audio_type: i32, rate: u32, channels: u32) -> Service {
         }),
         input_source_service: None,
         media_source_service: None,
+        bluetooth_service: None,
     }
 }
 
@@ -431,6 +472,18 @@ pub const DEFAULT_VIDEO_DENSITY_DPI: u32 = 170;
 pub const MIN_VIDEO_DENSITY_DPI: u32 = 100;
 pub const MAX_VIDEO_DENSITY_DPI: u32 = 480;
 
+pub(crate) fn validate_bluetooth_address(address: &str) -> Result<()> {
+    let octets = address.split(':').collect::<Vec<_>>();
+    if octets.len() != 6
+        || octets
+            .iter()
+            .any(|octet| octet.len() != 2 || !octet.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return Err(Error::InvalidMessage("Bluetooth address is malformed"));
+    }
+    Ok(())
+}
+
 fn validate_video_density(density_dpi: u32) -> Result<()> {
     if !(MIN_VIDEO_DENSITY_DPI..=MAX_VIDEO_DENSITY_DPI).contains(&density_dpi) {
         return Err(Error::InvalidMessage(
@@ -444,6 +497,7 @@ fn service_discovery_message(
     head_unit_name: &str,
     density_dpi: u32,
     audio_output: bool,
+    bluetooth_address: Option<&str>,
 ) -> ServiceDiscoveryResponse {
     let video = Service {
         id: i32::from(channel::VIDEO),
@@ -470,6 +524,7 @@ fn service_discovery_message(
         }),
         input_source_service: None,
         media_source_service: None,
+        bluetooth_service: None,
     };
     let sensor = Service {
         id: i32::from(channel::SENSOR),
@@ -480,6 +535,7 @@ fn service_discovery_message(
         media_sink_service: None,
         input_source_service: None,
         media_source_service: None,
+        bluetooth_service: None,
     };
     let input = Service {
         id: i32::from(channel::INPUT),
@@ -496,6 +552,7 @@ fn service_discovery_message(
             }],
         }),
         media_source_service: None,
+        bluetooth_service: None,
     };
     let microphone = Service {
         id: i32::from(channel::MICROPHONE),
@@ -507,9 +564,10 @@ fn service_discovery_message(
             audio_config: Some(audio_configuration(16_000, 1)),
             available_while_in_call: Some(true),
         }),
+        bluetooth_service: None,
     };
 
-    let channels = if audio_output {
+    let mut channels = if audio_output {
         vec![
             sensor,
             video,
@@ -528,6 +586,19 @@ fn service_discovery_message(
             microphone,
         ]
     };
+    if let Some(car_address) = bluetooth_address {
+        channels.push(Service {
+            id: i32::from(channel::BLUETOOTH),
+            sensor_source_service: None,
+            media_sink_service: None,
+            input_source_service: None,
+            media_source_service: None,
+            bluetooth_service: Some(BluetoothService {
+                car_address: car_address.to_owned(),
+                supported_pairing_methods: vec![BLUETOOTH_PAIRING_NUMERIC_COMPARISON],
+            }),
+        });
+    }
 
     ServiceDiscoveryResponse {
         channels,
@@ -555,17 +626,24 @@ fn service_discovery_message(
 }
 
 pub fn service_discovery_payload(head_unit_name: &str) -> Result<Vec<u8>> {
-    service_discovery_payload_with_density(head_unit_name, DEFAULT_VIDEO_DENSITY_DPI, true)
+    service_discovery_payload_with_density(head_unit_name, DEFAULT_VIDEO_DENSITY_DPI, true, None)
 }
 
 pub fn service_discovery_payload_with_density(
     head_unit_name: &str,
     density_dpi: u32,
     audio_output: bool,
+    bluetooth_address: Option<&str>,
 ) -> Result<Vec<u8>> {
     validate_head_unit_name(head_unit_name)?;
     validate_video_density(density_dpi)?;
-    Ok(service_discovery_message(head_unit_name, density_dpi, audio_output).encode_to_vec())
+    if let Some(address) = bluetooth_address {
+        validate_bluetooth_address(address)?;
+    }
+    Ok(
+        service_discovery_message(head_unit_name, density_dpi, audio_output, bluetooth_address)
+            .encode_to_vec(),
+    )
 }
 
 pub(crate) fn decode<M: Message + Default>(context: &'static str, payload: &[u8]) -> Result<M> {
@@ -585,6 +663,22 @@ pub(crate) fn auth_complete() -> Vec<u8> {
 
 pub(crate) fn status_ok() -> Vec<u8> {
     StatusResponse { status: STATUS_OK }.encode_to_vec()
+}
+
+pub(crate) fn bluetooth_pairing_response(already_paired: bool) -> Vec<u8> {
+    BluetoothPairingResponse {
+        status: STATUS_OK,
+        already_paired,
+    }
+    .encode_to_vec()
+}
+
+pub(crate) fn bluetooth_authentication(passkey: u32) -> Vec<u8> {
+    BluetoothAuthenticationData {
+        auth_data: format!("{passkey:06}"),
+        pairing_method: Some(BLUETOOTH_PAIRING_NUMERIC_COMPARISON),
+    }
+    .encode_to_vec()
 }
 
 pub(crate) fn setup_ok() -> Vec<u8> {
@@ -788,7 +882,7 @@ mod tests {
 
     #[test]
     fn service_discovery_advertises_the_requested_video_density() {
-        let payload = service_discovery_payload_with_density("Test Head Unit", 200, true)
+        let payload = service_discovery_payload_with_density("Test Head Unit", 200, true, None)
             .expect("SDR payload");
         let response = ServiceDiscoveryResponse::decode(payload.as_slice()).expect("SDR");
         let density = response
@@ -807,6 +901,7 @@ mod tests {
             "Test Head Unit",
             DEFAULT_VIDEO_DENSITY_DPI,
             false,
+            None,
         )
         .expect("SDR payload");
         let response = ServiceDiscoveryResponse::decode(payload.as_slice()).expect("SDR");
@@ -828,16 +923,85 @@ mod tests {
             .collect()
         );
         for id in channel::PHONE_AUDIO {
-            assert!(!channel::advertised(id, false));
-            assert!(channel::advertised(id, true));
+            assert!(!channel::advertised(id, false, false));
+            assert!(channel::advertised(id, true, false));
         }
-        assert!(channel::advertised(channel::SYSTEM_AUDIO, false));
-        assert!(channel::advertised(channel::MICROPHONE, false));
+        assert!(channel::advertised(channel::SYSTEM_AUDIO, false, false));
+        assert!(channel::advertised(channel::MICROPHONE, false, false));
+    }
+
+    #[test]
+    fn hands_free_calls_advertise_the_car_bluetooth_address() {
+        let payload = service_discovery_payload_with_density(
+            "Test Head Unit",
+            DEFAULT_VIDEO_DENSITY_DPI,
+            true,
+            Some("30:E3:D6:03:96:1E"),
+        )
+        .expect("SDR payload");
+        let response = ServiceDiscoveryResponse::decode(payload.as_slice()).expect("SDR");
+        let bluetooth = response
+            .channels
+            .iter()
+            .find(|service| service.id == i32::from(channel::BLUETOOTH))
+            .and_then(|service| service.bluetooth_service.as_ref())
+            .expect("Bluetooth service");
+        assert_eq!(bluetooth.car_address, "30:E3:D6:03:96:1E");
+        assert_eq!(
+            bluetooth.supported_pairing_methods,
+            [BLUETOOTH_PAIRING_NUMERIC_COMPARISON]
+        );
+        assert!(channel::advertised(channel::BLUETOOTH, true, true));
+        assert!(!channel::advertised(channel::BLUETOOTH, true, false));
+    }
+
+    #[test]
+    fn malformed_bluetooth_addresses_are_rejected() {
+        for address in [
+            "",
+            "30:E3:D6:03:96",
+            "30:E3:D6:03:96:1E:00",
+            "zz:E3:D6:03:96:1E",
+            "30E3D603961E",
+        ] {
+            assert!(
+                service_discovery_payload_with_density(
+                    "Test Head Unit",
+                    DEFAULT_VIDEO_DENSITY_DPI,
+                    true,
+                    Some(address),
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn authentication_data_carries_the_six_digit_passkey() {
+        let data = BluetoothAuthenticationData::decode(bluetooth_authentication(4_217).as_slice())
+            .expect("authentication data");
+        assert_eq!(data.auth_data, "004217");
+        assert_eq!(
+            data.pairing_method,
+            Some(BLUETOOTH_PAIRING_NUMERIC_COMPARISON)
+        );
+    }
+
+    #[test]
+    fn pairing_answer_reports_whether_a_bond_exists() {
+        for already_paired in [false, true] {
+            let response = BluetoothPairingResponse::decode(
+                bluetooth_pairing_response(already_paired).as_slice(),
+            )
+            .expect("response");
+            assert_eq!(response.status, STATUS_OK);
+            assert_eq!(response.already_paired, already_paired);
+        }
     }
 
     #[test]
     fn service_discovery_rejects_out_of_range_video_density() {
-        assert!(service_discovery_payload_with_density("Test Head Unit", 99, true).is_err());
-        assert!(service_discovery_payload_with_density("Test Head Unit", 481, true).is_err());
+        assert!(service_discovery_payload_with_density("Test Head Unit", 99, true, None).is_err());
+        assert!(service_discovery_payload_with_density("Test Head Unit", 481, true, None).is_err());
     }
 }

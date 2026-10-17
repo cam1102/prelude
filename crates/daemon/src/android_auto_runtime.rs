@@ -47,6 +47,8 @@ use std::{
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
 use platform_superbird::{LinuxInputBackend, LinuxInputConfig};
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
+use prelude_bluetooth_sco::ScoLink;
+#[cfg(all(target_os = "linux", feature = "linux-media"))]
 use prelude_media::{
     AudioBackendFailureKind, AudioBackendTelemetrySnapshot, AudioOutputDelaySource,
     AudioStreamConfig, LinuxAudioBackend, LinuxAudioBackendConfig, LinuxDisplayHandle,
@@ -58,6 +60,9 @@ use prelude_media::{
 
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
 use crate::first_video::{FirstVideoAction, FirstVideoWatchdog};
+use crate::hands_free::HandsFree;
+#[cfg(all(target_os = "linux", feature = "linux-media"))]
+use crate::hands_free::{CallBridge, CallSubscription};
 use crate::{
     AndroidAutoConfig, AudioBackend, AudioPipelineState, AudioRuntimeRoute, AudioRuntimeSnapshot,
     ConnectionStep, DaemonConfig, DisplayPlatform, DisplayStatus, Error, HealthState, MediaConfig,
@@ -85,6 +90,10 @@ const AUDIO_PLAYOUT_LATENCY_MS: u32 = 200;
 const MICROPHONE_FRAME_DURATION_MICROS: u32 = 20_000;
 const MICROPHONE_MAXIMUM_FRAME_BYTES: usize = 4_096;
 const MICROPHONE_MAXIMUM_BUFFER_BYTES: usize = 16 * 1024;
+const CALL_MICROPHONE_RATE: u32 = 8_000;
+const SYSTEM_CLOCK: usize = 2;
+#[cfg(all(target_os = "linux", feature = "linux-media"))]
+const BLUETOOTH_PASSKEY_WAIT: Duration = Duration::from_secs(60);
 const TEST_TONE_TIMEOUT: Duration = Duration::from_secs(2);
 pub const MAX_ANDROID_AUTO_WORKER_STOP_WAIT: Duration = Duration::from_secs(5);
 const WORKER_STOP_POLL: Duration = Duration::from_millis(10);
@@ -249,6 +258,7 @@ pub struct AndroidAutoRuntime {
     retry: RetrySchedule,
     last_failure: Option<RuntimeFailure>,
     audio_status: SharedAudioStatus,
+    hands_free: Option<HandsFree>,
 }
 
 impl fmt::Debug for AndroidAutoRuntime {
@@ -360,6 +370,7 @@ impl AndroidAutoRuntime {
             missing_audio_output: false,
             retry: RetrySchedule::new(),
             last_failure: None,
+            hands_free: None,
             audio_status: Arc::new(Mutex::new(
                 if requested_route == AudioRuntimeRoute::Disabled {
                     AudioRuntimeSnapshot::disabled()
@@ -368,6 +379,10 @@ impl AndroidAutoRuntime {
                 },
             )),
         })
+    }
+
+    pub(crate) fn attach_hands_free(&mut self, hands_free: HandsFree) {
+        self.hands_free = Some(hands_free);
     }
 
     #[cfg(all(target_os = "linux", feature = "linux-media"))]
@@ -624,6 +639,7 @@ impl ProjectionRuntime for AndroidAutoRuntime {
             };
             let audio_status = Arc::clone(&self.audio_status);
             let display = self.display.clone();
+            let hands_free = self.hands_free.clone();
             persist_last_display_platform(&self.state_dir, DisplayPlatform::AndroidAuto).map_err(
                 |error| {
                     Error::Runtime(format!(
@@ -648,6 +664,7 @@ impl ProjectionRuntime for AndroidAutoRuntime {
                         worker_shutdown,
                         worker_setup_cancellation,
                         control_receiver,
+                        hands_free,
                     )
                 }) {
                 Ok(handle) => handle,
@@ -1159,20 +1176,20 @@ fn pcm_s16le_to_be(pcm: &[u8]) -> std::result::Result<Vec<u8>, String> {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct AudioClock {
+pub(crate) struct AudioClock {
     sequence: u16,
     next_timestamp: u32,
 }
 
 impl AudioClock {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             sequence: 0,
             next_timestamp: 0,
         }
     }
 
-    fn frame(
+    pub(crate) fn frame(
         &mut self,
         stream_id: AudioStreamId,
         format_id: AudioFormatId,
@@ -1469,6 +1486,8 @@ struct LiveMedia {
     audio_clocks: [AudioClock; 3],
     audio_ingress: [AudioIngressWindow; 3],
     microphone: Option<LinuxMicrophoneBackend>,
+    calls: Option<CallSubscription>,
+    call: Option<ActiveCall>,
     input: LinuxInputBackend,
     input_mapper: InputMapper,
     input_suppressed: bool,
@@ -1483,6 +1502,12 @@ struct LiveMedia {
 }
 
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
+#[derive(Debug)]
+struct ActiveCall {
+    bridge: CallBridge,
+}
+
+#[cfg(all(target_os = "linux", feature = "linux-media"))]
 impl fmt::Debug for LiveMedia {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -1490,6 +1515,7 @@ impl fmt::Debug for LiveMedia {
             .field("video_started", &self.video.is_some())
             .field("audio", &self.audio)
             .field("microphone_started", &self.microphone.is_some())
+            .field("call", &self.call)
             .field("input", &self.input)
             .finish_non_exhaustive()
     }
@@ -1503,6 +1529,7 @@ impl LiveMedia {
         display: Option<LinuxDisplayHandle>,
         status: SharedAudioStatus,
         progress: SharedProgress,
+        hands_free: Option<&HandsFree>,
     ) -> std::result::Result<Self, String> {
         if config.video != VideoBackend::AmlogicV4l2
             || config.audio != AudioBackend::AlsaUsb
@@ -1562,6 +1589,7 @@ impl LiveMedia {
         })
         .map_err(|error| format!("opening Android Auto input backend failed: {error}"))?;
         let video_telemetry = VideoSynchronizationTelemetry::new(video_config.output_delay);
+        let calls = audio.as_ref().and(hands_free).map(HandsFree::subscribe);
         update_audio_status(&status, |status| {
             if audio.is_none() {
                 *status = AudioRuntimeSnapshot::disabled();
@@ -1592,6 +1620,8 @@ impl LiveMedia {
             audio_clocks: [AudioClock::new(), AudioClock::new(), AudioClock::new()],
             audio_ingress: [AudioIngressWindow::default(); 3],
             microphone: None,
+            calls,
+            call: None,
             input,
             input_mapper: InputMapper::new(),
             input_suppressed: false,
@@ -1643,7 +1673,9 @@ impl LiveMedia {
                 }
                 Ok(true)
             }
-            Event::Battery { .. } => Ok(true),
+            Event::Battery { .. }
+            | Event::BluetoothPairing { .. }
+            | Event::BluetoothAuthenticated { .. } => Ok(true),
         }
     }
 
@@ -1728,6 +1760,9 @@ impl LiveMedia {
         let Some(audio) = self.audio.as_ref() else {
             return Ok(());
         };
+        if self.call.is_some() && matches!(channel, ProtocolAudioChannel::System) {
+            return Ok(());
+        }
         let (clock_index, stream_id, format_id, sample_rate_hz, channels) = match channel {
             ProtocolAudioChannel::Media => (
                 0,
@@ -1744,7 +1779,7 @@ impl LiveMedia {
                 AUDIO_VOICE_CHANNELS,
             ),
             ProtocolAudioChannel::System => (
-                2,
+                SYSTEM_CLOCK,
                 AudioStreamId::High,
                 AUDIO_VOICE_FORMAT,
                 AUDIO_VOICE_RATE,
@@ -1797,6 +1832,10 @@ impl LiveMedia {
             return Err(format!(
                 "phone requested unsupported Android Auto microphone format {sample_rate}Hz/{channels}ch"
             ));
+        }
+        if self.call.is_some() {
+            tracing::info!("the microphone belongs to the Bluetooth call; ignoring Android Auto");
+            return Ok(());
         }
         if self.microphone.is_some() {
             return Ok(());
@@ -2071,10 +2110,78 @@ impl LiveMedia {
                 }
             }
         }
+        self.poll_call();
         self.log_audio_diagnostic();
         self.log_video_diagnostic();
         self.refresh_status();
         Ok(())
+    }
+
+    fn poll_call(&mut self) {
+        if self
+            .call
+            .as_ref()
+            .is_some_and(|call| call.bridge.is_finished())
+        {
+            self.end_call();
+        }
+        if let Some(link) = self.calls.as_ref().and_then(CallSubscription::try_next) {
+            self.end_call();
+            self.start_call(link);
+        }
+    }
+
+    fn start_call(&mut self, link: ScoLink) {
+        let Some(frames) = self
+            .audio
+            .as_ref()
+            .and_then(|audio| audio.frame_sender(AudioStreamId::High))
+        else {
+            return;
+        };
+        if let Some(microphone) = self.microphone.take() {
+            if let Err(error) = microphone.shutdown() {
+                tracing::warn!(%error, "stopping the assistant microphone for a call failed");
+            }
+            update_audio_status(&self.status, |status| {
+                status.microphone.capture_running = false;
+                status.microphone.ready = false;
+            });
+        }
+        let mtu = link.mtu();
+        let microphone = match start_call_microphone() {
+            Ok(microphone) => Some(microphone),
+            Err(error) => {
+                tracing::warn!(%error, "the call microphone could not start; the caller hears silence");
+                None
+            }
+        };
+        let has_microphone = microphone.is_some();
+        let bridge =
+            match CallBridge::start(link, frames, self.audio_clocks[SYSTEM_CLOCK], microphone) {
+                Ok(bridge) => bridge,
+                Err(error) => {
+                    tracing::warn!(%error, "starting Bluetooth call audio failed");
+                    return;
+                }
+            };
+        tracing::info!(
+            peer = bridge.peer(),
+            mtu,
+            microphone = has_microphone,
+            "playing Bluetooth call audio on the DAC"
+        );
+        self.call = Some(ActiveCall { bridge });
+    }
+
+    fn end_call(&mut self) {
+        let Some(call) = self.call.take() else {
+            return;
+        };
+        tracing::info!(peer = call.bridge.peer(), "Bluetooth call audio ended");
+        if let Some(clock) = call.bridge.finish() {
+            self.audio_clocks[SYSTEM_CLOCK] = clock;
+        }
     }
 
     fn record_busy(&mut self, started: Instant) {
@@ -2175,6 +2282,8 @@ impl LiveMedia {
     }
 
     fn shutdown(mut self) -> std::result::Result<(), String> {
+        self.end_call();
+        self.calls = None;
         let mut first_error = None;
         if let Some(microphone) = self.microphone.take() {
             if let Err(error) = microphone.shutdown() {
@@ -2205,6 +2314,25 @@ impl LiveMedia {
         });
         first_error.map_or(Ok(()), Err)
     }
+}
+
+#[cfg(all(target_os = "linux", feature = "linux-media"))]
+fn start_call_microphone() -> std::result::Result<LinuxMicrophoneBackend, String> {
+    let packetizer = MicrophonePacketizer::new_raw_pcm_s16le(MicrophoneConfig {
+        stream_id: AudioStreamId::Main,
+        codec: MicrophoneCodec::RawPcmS16Le,
+        sample_rate_hz: CALL_MICROPHONE_RATE,
+        channels: 1,
+        frame_duration_micros: MICROPHONE_FRAME_DURATION_MICROS,
+        maximum_encoded_frame_bytes: MICROPHONE_MAXIMUM_FRAME_BYTES,
+        maximum_pcm_buffer_bytes: MICROPHONE_MAXIMUM_BUFFER_BYTES,
+    })
+    .map_err(|error| format!("configuring the call microphone failed: {error}"))?;
+    LinuxMicrophoneBackend::start(LinuxMicrophoneBackendConfig::with_route(
+        packetizer,
+        MicrophoneInputRoute::BuiltInSuperbird,
+    ))
+    .map_err(|error| format!("starting the call microphone failed: {error}"))
 }
 
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
@@ -2289,6 +2417,7 @@ struct WorkerContext {
     controls: Receiver<WorkerControl>,
     ended_by_phone: AtomicBool,
     ping_timeout: Duration,
+    hands_free: Option<HandsFree>,
 }
 
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
@@ -2305,6 +2434,7 @@ fn run_worker(
     shutdown: ShutdownSignal,
     setup_cancellation: prelude_android_auto::CancellationToken,
     controls: Receiver<WorkerControl>,
+    hands_free: Option<HandsFree>,
 ) -> std::result::Result<(), String> {
     let ping_timeout = match &transport {
         WorkerTransport::Usb(_) => Duration::from_millis(config.ping_timeout_ms),
@@ -2323,6 +2453,7 @@ fn run_worker(
         controls,
         ended_by_phone: AtomicBool::new(false),
         ping_timeout,
+        hands_free,
     };
     let result = match transport {
         WorkerTransport::Usb(candidate) => {
@@ -2364,6 +2495,7 @@ fn run_usb_worker(
         shutdown,
         ..
     } = context;
+    let _usb_session = context.hands_free.as_ref().map(HandsFree::usb_session);
     set_stage(progress, WorkerStage::OpeningAoap);
     let mut backend = RusbBackend;
     let identity = AccessoryIdentity {
@@ -2438,14 +2570,24 @@ fn run_protocol<T: std::io::Read + std::io::Write + Send>(
         controls,
         ended_by_phone,
         ping_timeout,
+        hands_free,
     } = context;
+    let audio_output = !config.disable_audio_output;
+    let bluetooth_address = hands_free
+        .as_ref()
+        .filter(|_| audio_output)
+        .and_then(HandsFree::car_address);
+    if let Some(address) = &bluetooth_address {
+        tracing::info!(address, "offering Bluetooth hands-free calls to the phone");
+    }
     let session_config = SessionConfig {
         head_unit_name: config.head_unit_name.clone(),
         video_density_dpi: config.ui_density_dpi,
         ping_interval: Duration::from_millis(config.ping_interval_ms),
         ping_timeout: *ping_timeout,
         initial_night_mode: ambient_light.night_mode(),
-        audio_output: !config.disable_audio_output,
+        audio_output,
+        bluetooth_address,
         ..SessionConfig::default()
     };
     let mut session = Session::new(io, session_config)
@@ -2462,6 +2604,7 @@ fn run_protocol<T: std::io::Read + std::io::Write + Send>(
     let mut pending_voice_session = None;
     let mut pending_microphone = None;
     let mut first_video = None;
+    let mut pairing_phone: Option<(String, Instant)> = None;
     let session_result = (|| {
         while session.is_alive() {
             if shutdown.is_requested() && !shutdown_started {
@@ -2499,10 +2642,11 @@ fn run_protocol<T: std::io::Read + std::io::Write + Send>(
                             set_stage(progress, WorkerStage::StartingMedia);
                             media = Some(LiveMedia::start(
                                 media_config,
-                                !config.disable_audio_output,
+                                audio_output,
                                 display.clone(),
                                 Arc::clone(audio_status),
                                 Arc::clone(progress),
+                                hands_free.as_ref(),
                             )?);
                             if let Some(active) = pending_voice_session.take() {
                                 media
@@ -2538,6 +2682,28 @@ fn run_protocol<T: std::io::Read + std::io::Write + Send>(
                         }
                     }
                     Event::Battery { .. } => {}
+                    Event::BluetoothPairing { phone_address } => {
+                        let phone = phone_address.as_deref().unwrap_or("unknown");
+                        let paired = phone_address
+                            .as_deref()
+                            .zip(hands_free.as_ref())
+                            .and_then(|(address, hands_free)| hands_free.is_paired(address))
+                            .unwrap_or(false);
+                        tracing::info!(
+                            phone,
+                            paired,
+                            "the phone asked to pair Bluetooth for calls"
+                        );
+                        session.answer_bluetooth_pairing(paired).map_err(|error| {
+                            format!("answering the Bluetooth pairing request failed: {error}")
+                        })?;
+                        pairing_phone = phone_address
+                            .filter(|_| !paired)
+                            .map(|address| (address, Instant::now() + BLUETOOTH_PASSKEY_WAIT));
+                    }
+                    Event::BluetoothAuthenticated { status } => {
+                        tracing::info!(?status, "the phone finished Bluetooth pairing for calls");
+                    }
                     Event::Microphone {
                         open,
                         sample_rate,
@@ -2553,6 +2719,29 @@ fn run_protocol<T: std::io::Read + std::io::Write + Send>(
                         media.handle_event(event, &mut session)?;
                         media.record_busy(started);
                     }
+                }
+            }
+            if let Some((address, deadline)) = pairing_phone.take() {
+                match hands_free
+                    .as_ref()
+                    .and_then(|hands_free| hands_free.take_passkey(&address))
+                {
+                    Some(passkey) => {
+                        tracing::info!(
+                            phone = address,
+                            "sending the Bluetooth pairing passkey to the phone"
+                        );
+                        session.send_bluetooth_passkey(passkey).map_err(|error| {
+                            format!("sending the Bluetooth pairing passkey failed: {error}")
+                        })?;
+                    }
+                    None if Instant::now() < deadline => {
+                        pairing_phone = Some((address, deadline));
+                    }
+                    None => tracing::warn!(
+                        phone = address,
+                        "the phone never started Bluetooth pairing with Prelude"
+                    ),
                 }
             }
             if let Some(media) = media.as_mut()

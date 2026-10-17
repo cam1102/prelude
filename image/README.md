@@ -249,6 +249,19 @@ adapter it finds, using its own `hostapd` and DHCP-only `dnsmasq`. The system
 drops the Hands-Free link once projection is running, so the phone keeps calls
 on its own speaker and microphone.
 
+Android Auto calls always travel over Bluetooth Hands-Free, wired or wireless.
+With Phone audio off, `preluded` advertises the controller address in Android
+Auto service discovery so the phone pairs for calls on its own. The BlueZ agent
+uses numeric comparison, and `preluded` forwards the passkey over Android Auto
+so the phone can confirm the pairing itself. It then plays
+the SCO call audio (CVSD, 8 kHz) through the USB DAC and sends the built-in
+microphone back. Once the controller is up, `preluded` runs
+`hcitool cmd 0x3f 0x1c` to route SCO over the UART rather than the BCM PCM pins.
+Without a Wi-Fi adapter, Bluetooth stays on only for Hands-Free and stays
+hidden: it registers no iAP2 or Android Auto wireless records and is pairable
+but not discoverable. If Phone audio is also on, Bluetooth powers off instead.
+CarPlay calls ride the CarPlay session's telephony stream instead.
+
 - The Bluetooth name is the configured `head_unit_name` (`Prelude`). The SSID is
   `Prelude-XXXX`, derived from the adapter address, and the access point is
   `10.47.0.1/24` on channel 36 at 80 MHz.

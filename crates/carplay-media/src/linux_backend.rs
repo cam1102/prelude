@@ -1190,6 +1190,45 @@ struct QueuedAudioFrame {
     frame: EncryptedAudioFrame,
 }
 
+#[derive(Debug, Clone)]
+pub struct AudioFrameSender {
+    stream_id: AudioStreamId,
+    sender: SyncSender<QueuedAudioFrame>,
+}
+
+impl AudioFrameSender {
+    pub fn try_submit(&self, frame: EncryptedAudioFrame) -> Result<()> {
+        if frame.stream_id != self.stream_id {
+            return Err(Error::InvalidAudio(
+                "audio frame belongs to a different stream".to_owned(),
+            ));
+        }
+        queue_audio_frame(
+            &self.sender,
+            QueuedAudioFrame {
+                generation: None,
+                frame,
+            },
+        )
+    }
+}
+
+fn queue_audio_frame(
+    sender: &SyncSender<QueuedAudioFrame>,
+    queued: QueuedAudioFrame,
+) -> Result<()> {
+    match sender.try_send(queued) {
+        Ok(()) => Ok(()),
+        Err(TrySendError::Full(_)) => Err(Error::Backend(
+            "audio mixer ingress is full; no audio stream was dropped".to_owned(),
+        )),
+        Err(TrySendError::Disconnected(_)) => Err(Error::NotReady {
+            component: "audio mixer",
+            state: "stopped",
+        }),
+    }
+}
+
 pub struct LinuxAudioBackend {
     frames: BTreeMap<AudioStreamId, SyncSender<QueuedAudioFrame>>,
     controls: SyncSender<AudioControlCommand>,
@@ -1394,16 +1433,14 @@ impl LinuxAudioBackend {
         let sender = self.frames.get(&frame.stream_id).ok_or_else(|| {
             Error::InvalidAudio("audio frame has no bounded ingress queue".to_owned())
         })?;
-        match sender.try_send(QueuedAudioFrame { generation, frame }) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => Err(Error::Backend(
-                "audio mixer ingress is full; no audio stream was dropped".to_owned(),
-            )),
-            Err(TrySendError::Disconnected(_)) => Err(Error::NotReady {
-                component: "audio mixer",
-                state: "stopped",
-            }),
-        }
+        queue_audio_frame(sender, QueuedAudioFrame { generation, frame })
+    }
+
+    pub fn frame_sender(&self, stream_id: AudioStreamId) -> Option<AudioFrameSender> {
+        self.frames.get(&stream_id).map(|sender| AudioFrameSender {
+            stream_id,
+            sender: sender.clone(),
+        })
     }
 
     pub fn try_error(&self) -> Result<Option<BackendFailure>> {

@@ -4,6 +4,7 @@ use prelude_control::{ImplementationStatus, ProjectionCapabilities};
 use crate::{
     AndroidAutoRuntime, AudioRuntimeSnapshot, DaemonConfig, HealthState, ProjectionDevice,
     ProjectionRuntime, Result, RuntimeProbe, WiredCarkitRuntime, WirelessCarPlayRuntime,
+    hands_free::HandsFree,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +72,10 @@ impl AutomaticProjectionRuntime {
 
     pub fn attach_wireless(&mut self, wireless_carplay: WirelessCarPlayRuntime) {
         self.wireless_carplay = Some(Box::new(wireless_carplay));
+    }
+
+    pub(crate) fn attach_hands_free(&mut self, hands_free: HandsFree) {
+        self.android_auto.attach_hands_free(hands_free);
     }
 
     fn runtime(&mut self, protocol: ActiveProtocol) -> Option<&mut dyn ProjectionRuntime> {

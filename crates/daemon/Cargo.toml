@@ -15,6 +15,7 @@ linux-media = ["prelude-media/linux-backend"]
 clap.workspace = true
 prelude-android-auto-protocol = { path = "../android-auto-protocol" }
 prelude-android-auto = { path = "../android-auto" }
+prelude-bluetooth-sco = { path = "../bluetooth-sco" }
 prelude-control = { path = "../carplay-control" }
 prelude-iap2 = { path = "../iap2" }
 prelude-media = { path = "../carplay-media", default-features = false }

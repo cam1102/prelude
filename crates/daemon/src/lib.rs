@@ -14,6 +14,7 @@ mod error;
 mod first_video;
 #[cfg(any(test, all(target_os = "linux", feature = "linux-media")))]
 mod fonts;
+mod hands_free;
 mod health;
 mod heartbeat;
 #[cfg(all(target_os = "linux", feature = "linux-media"))]

@@ -58,11 +58,11 @@ pub use equalizer::{
 pub use error::{Error, Result};
 #[cfg(all(target_os = "linux", feature = "linux-backend"))]
 pub use linux_backend::{
-    AudioBackendFailureKind, AudioBackendTelemetrySnapshot, AudioOutputRoute, AudioSinkStats,
-    BackendFailure, LinuxAudioBackend, LinuxAudioBackendConfig, LinuxMicrophoneBackend,
-    LinuxMicrophoneBackendConfig, LinuxVideoBackend, LinuxVideoBackendConfig,
-    MicrophoneBackendEvent, MicrophoneCaptureLevel, MicrophoneInputRoute, VideoBackendEvent,
-    VideoSynchronizationTelemetry, VideoSynchronizationTelemetrySnapshot,
+    AudioBackendFailureKind, AudioBackendTelemetrySnapshot, AudioFrameSender, AudioOutputRoute,
+    AudioSinkStats, BackendFailure, LinuxAudioBackend, LinuxAudioBackendConfig,
+    LinuxMicrophoneBackend, LinuxMicrophoneBackendConfig, LinuxVideoBackend,
+    LinuxVideoBackendConfig, MicrophoneBackendEvent, MicrophoneCaptureLevel, MicrophoneInputRoute,
+    VideoBackendEvent, VideoSynchronizationTelemetry, VideoSynchronizationTelemetrySnapshot,
 };
 pub use microphone_wire::{
     MicrophoneCodec, MicrophoneConfig, MicrophoneCounters, MicrophonePacket, MicrophonePacketizer,

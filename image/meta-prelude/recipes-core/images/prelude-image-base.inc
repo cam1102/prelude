@@ -46,6 +46,7 @@ prelude_validate_wireless_rootfs() {
     for path in \
         ${libexecdir}/bluetooth/bluetoothd \
         ${bindir}/superbird-bluetooth \
+        ${bindir}/hcitool \
         ${nonarch_base_libdir}/firmware/brcm/BCM20703A2.hcd \
         ${nonarch_base_libdir}/firmware/regulatory.db \
         ${systemd_system_unitdir}/bluetooth.service \

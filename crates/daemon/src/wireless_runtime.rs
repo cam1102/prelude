@@ -16,17 +16,19 @@ use std::{
 };
 
 use platform_superbird::{AccessoryIdentitySource, SuperbirdIdentitySource};
+use prelude_bluetooth_sco::ScoListener;
 use prelude_wireless::{
     access_point::{self, AccessPoint, AccessPointConfig, ChannelWidth, StationControl},
     bluez::{
-        self, BluetoothConfig, BluetoothControl, BluetoothService, PhoneKind, RfcommConnection,
-        RfcommProfile,
+        self, BluetoothConfig, BluetoothControl, BluetoothService, PairingPasskeys, PhoneKind,
+        RfcommConnection, RfcommProfile,
     },
     hfp, wpp,
 };
 
 use crate::{
     DaemonConfig, Error, Result, WirelessConfig,
+    hands_free::HandsFree,
     known_phones::{self, KnownPhone},
 };
 
@@ -40,6 +42,7 @@ const FOCUS_WINDOW: Duration = Duration::from_secs(60);
 const ACCESS_POINT_WAIT: Duration = Duration::from_secs(20);
 const RFCOMM_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const PROJECTION_WRITE_TIMEOUT: Duration = Duration::from_secs(4);
+const CALL_AUDIO_ACCEPT_POLL: Duration = Duration::from_millis(500);
 const PASSPHRASE_LEN: usize = 16;
 const PASSPHRASE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
 
@@ -460,6 +463,7 @@ pub struct WirelessService {
     directory: WirelessPhoneDirectory,
     radio: SharedRadio,
     phone_audio: Arc<AtomicBool>,
+    hands_free: HandsFree,
     stop: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
 }
@@ -478,6 +482,12 @@ impl WirelessService {
         let radio = Arc::new(RwLock::new((wireless.channel, wireless.channel_width_mhz)));
         let phone_audio = Arc::new(AtomicBool::new(config.android_auto.disable_audio_output));
         let wifi_present = Arc::new(AtomicBool::new(wifi_interface(wireless).is_some()));
+        let passkeys = PairingPasskeys::default();
+        let hands_free = HandsFree::new(
+            Arc::clone(&bluetooth_address),
+            Arc::clone(&bluetooth_control),
+            passkeys.clone(),
+        );
         let stop = Arc::new(AtomicBool::new(false));
         let state_dir = wireless_state_dir(&config.state_dir);
         let directory = WirelessPhoneDirectory {
@@ -524,6 +534,8 @@ impl WirelessService {
                 adapter: wireless.bluetooth_adapter.clone(),
                 alias: config.android_auto.head_unit_name.clone(),
                 discoverable: wireless.discoverable,
+                pairable: wireless.discoverable,
+                projection: true,
                 android_auto: wireless.android_auto,
                 carplay: wireless.carplay,
             };
@@ -540,11 +552,20 @@ impl WirelessService {
                 directory: directory.clone(),
                 phone_audio: Arc::clone(&phone_audio),
                 wifi_present,
+                passkeys,
+                hands_free: hands_free.clone(),
                 state_dir,
                 stop: Arc::clone(&stop),
             };
             move || dispatch.run(&bluetooth)
         })?);
+        if wireless.android_auto {
+            threads.push(spawn_named("prelude-call-audio", {
+                let hands_free = hands_free.clone();
+                let stop = Arc::clone(&stop);
+                move || serve_call_audio(&hands_free, &stop)
+            })?);
+        }
         Ok(Some(Self {
             android_auto,
             carplay,
@@ -554,6 +575,7 @@ impl WirelessService {
             directory,
             radio,
             phone_audio,
+            hands_free,
             stop,
             threads,
         }))
@@ -567,6 +589,10 @@ impl WirelessService {
 
     pub fn set_phone_audio(&self, enabled: bool) {
         self.phone_audio.store(enabled, Ordering::Relaxed);
+    }
+
+    pub(crate) fn hands_free(&self) -> HandsFree {
+        self.hands_free.clone()
     }
 
     pub fn directory(&self) -> WirelessPhoneDirectory {
@@ -618,6 +644,36 @@ fn sleep_unless_stopped(stop: &AtomicBool, duration: Duration) {
     let deadline = Instant::now() + duration;
     while !stop.load(Ordering::Relaxed) && Instant::now() < deadline {
         thread::sleep(SUPERVISOR_POLL);
+    }
+}
+
+fn serve_call_audio(hands_free: &HandsFree, stop: &AtomicBool) {
+    let mut failure_logged = false;
+    while !stop.load(Ordering::Relaxed) {
+        let listener = match ScoListener::bind() {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => return,
+            Err(error) => {
+                if !failure_logged {
+                    tracing::warn!(%error, "listening for Bluetooth call audio failed; retrying");
+                    failure_logged = true;
+                }
+                sleep_unless_stopped(stop, BLUETOOTH_RETRY);
+                continue;
+            }
+        };
+        failure_logged = false;
+        while !stop.load(Ordering::Relaxed) {
+            match listener.accept(CALL_AUDIO_ACCEPT_POLL) {
+                Ok(Some(link)) => hands_free.offer_call(link),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "accepting Bluetooth call audio failed");
+                    sleep_unless_stopped(stop, BLUETOOTH_RETRY);
+                    break;
+                }
+            }
+        }
     }
 }
 
@@ -964,25 +1020,35 @@ struct BluetoothDispatch {
     directory: WirelessPhoneDirectory,
     phone_audio: Arc<AtomicBool>,
     wifi_present: Arc<AtomicBool>,
+    passkeys: PairingPasskeys,
+    hands_free: HandsFree,
     state_dir: PathBuf,
     stop: Arc<AtomicBool>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BluetoothMode {
+    Projection,
+    HandsFreeOnly,
+}
+
 impl BluetoothDispatch {
-    fn run(&self, bluetooth: &BluetoothConfig) {
+    fn run(&self, base: &BluetoothConfig) {
         while !self.stop.load(Ordering::Relaxed) {
-            if !self.has_wifi() {
-                self.power_off_until_wifi(&bluetooth.adapter);
+            let Some(mode) = self.mode() else {
+                self.power_off_while_unneeded(&base.adapter);
                 continue;
-            }
-            let (service, incoming) = match BluetoothService::start(bluetooth.clone()) {
-                Ok(started) => started,
-                Err(error) => {
-                    tracing::warn!(%error, "Bluetooth is not ready; retrying");
-                    sleep_unless_stopped(&self.stop, BLUETOOTH_RETRY);
-                    continue;
-                }
             };
+            let bluetooth = self.bluetooth_config(base, mode);
+            let (service, incoming) =
+                match BluetoothService::start(bluetooth, self.passkeys.clone()) {
+                    Ok(started) => started,
+                    Err(error) => {
+                        tracing::warn!(%error, "Bluetooth is not ready; retrying");
+                        sleep_unless_stopped(&self.stop, BLUETOOTH_RETRY);
+                        continue;
+                    }
+                };
             if let Ok(mut address) = self.bluetooth_address.write() {
                 *address = Some(service.address());
             }
@@ -990,7 +1056,10 @@ impl BluetoothDispatch {
                 *control = Some(service.control());
             }
             let mut next_page = Instant::now() + RECONNECT_DELAY;
-            while !self.stop.load(Ordering::Relaxed) && service.is_running() && self.has_wifi() {
+            while !self.stop.load(Ordering::Relaxed)
+                && service.is_running()
+                && self.mode() == Some(mode)
+            {
                 match incoming.recv_timeout(Duration::from_millis(500)) {
                     Ok(connection) => self.accept(connection),
                     Err(RecvTimeoutError::Timeout) => {}
@@ -1001,7 +1070,7 @@ impl BluetoothDispatch {
                 }
                 if Instant::now() >= next_page {
                     next_page = Instant::now() + RECONNECT_INTERVAL;
-                    self.page_last_phone(&service);
+                    self.page_last_phone(&service, mode);
                 }
             }
             if let Ok(mut control) = self.bluetooth_control.write() {
@@ -1015,15 +1084,45 @@ impl BluetoothDispatch {
         self.wifi_present.load(Ordering::Relaxed)
     }
 
-    fn power_off_until_wifi(&self, adapter: &str) {
+    fn hands_free_calls(&self) -> bool {
+        self.wireless.android_auto && !self.phone_audio.load(Ordering::Relaxed)
+    }
+
+    fn mode(&self) -> Option<BluetoothMode> {
+        if self.has_wifi() {
+            Some(BluetoothMode::Projection)
+        } else if self.hands_free_calls() {
+            Some(BluetoothMode::HandsFreeOnly)
+        } else {
+            None
+        }
+    }
+
+    fn bluetooth_config(&self, base: &BluetoothConfig, mode: BluetoothMode) -> BluetoothConfig {
+        let projection = mode == BluetoothMode::Projection;
+        if !projection {
+            tracing::info!(
+                "no Wi-Fi adapter; Bluetooth carries only hands-free calls and stays hidden"
+            );
+        }
+        BluetoothConfig {
+            discoverable: base.discoverable && projection,
+            pairable: (base.pairable && projection) || self.hands_free_calls(),
+            projection,
+            carplay: base.carplay && projection,
+            ..base.clone()
+        }
+    }
+
+    fn power_off_while_unneeded(&self, adapter: &str) {
         let mut powered_off = false;
         let mut next_attempt = Instant::now();
-        while !self.stop.load(Ordering::Relaxed) && !self.has_wifi() {
+        while !self.stop.load(Ordering::Relaxed) && self.mode().is_none() {
             if !powered_off && Instant::now() >= next_attempt {
                 match bluez::power_off(adapter) {
                     Ok(()) => {
                         tracing::info!(
-                            "no Wi-Fi adapter; Bluetooth is off until one is plugged in"
+                            "no Wi-Fi adapter and calls stay on the phone; Bluetooth is off"
                         );
                         powered_off = true;
                     }
@@ -1036,7 +1135,7 @@ impl BluetoothDispatch {
             thread::sleep(SUPERVISOR_POLL);
         }
         if powered_off && !self.stop.load(Ordering::Relaxed) {
-            tracing::info!("Wi-Fi adapter found; turning Bluetooth back on");
+            tracing::info!("turning Bluetooth back on");
         }
     }
 
@@ -1056,7 +1155,7 @@ impl BluetoothDispatch {
         self.directory.dismiss(&peer);
     }
 
-    fn page_last_phone(&self, service: &BluetoothService) {
+    fn page_last_phone(&self, service: &BluetoothService, mode: BluetoothMode) {
         if !self.carplay.snapshot().is_empty() || !self.android_auto.snapshot().is_empty() {
             return;
         }
@@ -1067,7 +1166,7 @@ impl BluetoothDispatch {
             return;
         }
         let enabled = match phone.kind {
-            PhoneKind::CarPlay => self.wireless.carplay,
+            PhoneKind::CarPlay => self.wireless.carplay && mode == BluetoothMode::Projection,
             PhoneKind::AndroidAuto => self.wireless.android_auto,
         };
         if enabled {
@@ -1127,6 +1226,7 @@ impl BluetoothDispatch {
             access_point: Arc::clone(&self.access_point),
             bluetooth_control: Arc::clone(&self.bluetooth_control),
             android_auto_peer: Arc::clone(&self.android_auto_peer),
+            hands_free: self.hands_free.clone(),
             state_dir: self.state_dir.clone(),
         };
         let stop = Arc::clone(&self.stop);
@@ -1147,6 +1247,7 @@ struct RfcommLinks {
     access_point: SharedAccessPoint,
     bluetooth_control: SharedBluetoothControl,
     android_auto_peer: SharedPeer,
+    hands_free: HandsFree,
     state_dir: PathBuf,
 }
 
@@ -1200,6 +1301,13 @@ fn bootstrap_android_auto(
 ) -> Result<()> {
     let wireless = &links.wireless;
     if !wireless.android_auto {
+        return Ok(());
+    }
+    if links.hands_free.projecting_over_usb() {
+        tracing::info!(
+            peer,
+            "declining wireless Android Auto while a phone projects over USB"
+        );
         return Ok(());
     }
     let info =
