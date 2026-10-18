@@ -465,6 +465,11 @@ pub struct WirelessService {
     radio: SharedRadio,
     phone_audio: Arc<AtomicBool>,
     hands_free: HandsFree,
+    #[cfg_attr(
+        not(all(target_os = "linux", feature = "linux-media")),
+        allow(dead_code)
+    )]
+    passkeys: PairingPasskeys,
     stop: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
 }
@@ -554,7 +559,7 @@ impl WirelessService {
                 directory: directory.clone(),
                 phone_audio: Arc::clone(&phone_audio),
                 wifi_present,
-                passkeys,
+                passkeys: passkeys.clone(),
                 hands_free: hands_free.clone(),
                 state_dir,
                 stop: Arc::clone(&stop),
@@ -578,9 +583,28 @@ impl WirelessService {
             radio,
             phone_audio,
             hands_free,
+            passkeys,
             stop,
             threads,
         }))
+    }
+
+    #[cfg(all(target_os = "linux", feature = "linux-media"))]
+    pub fn show_pairing_codes(
+        &mut self,
+        display: prelude_media::LinuxDisplayHandle,
+        state_dir: PathBuf,
+    ) -> Result<()> {
+        let passkeys = self.passkeys.clone();
+        let control = Arc::clone(&self.bluetooth_control);
+        let stop = Arc::clone(&self.stop);
+        self.threads
+            .push(spawn_named("prelude-pairing-code", move || {
+                crate::pairing_code::show_pairing_codes(
+                    &display, &passkeys, &control, &state_dir, &stop,
+                );
+            })?);
+        Ok(())
     }
 
     pub fn set_radio(&self, channel: u8, width: ChannelWidth) {

@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     fs::{self, OpenOptions},
     io::Write,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
@@ -19,6 +20,7 @@ pub enum DisplayStatus {
     WaitingForPhone,
     UnlockPhone,
     Connecting(Option<ConnectionStep>),
+    ConfirmPairing(u32),
     Connected,
     MissingAudioOutput,
 }
@@ -79,16 +81,17 @@ impl DisplayStatus {
         match self {
             Self::WaitingForPhone => "Waiting for phone…",
             Self::UnlockPhone => "Unlock your phone",
-            Self::Connecting(_) => "Connecting…",
+            Self::Connecting(_) | Self::ConfirmPairing(_) => "Connecting…",
             Self::Connected => "Connected!",
             Self::MissingAudioOutput => "Missing audio output device",
         }
     }
 
-    pub const fn detail(self) -> Option<&'static str> {
+    pub fn detail(self) -> Option<Cow<'static, str>> {
         match self {
-            Self::Connecting(Some(step)) => Some(step.label()),
-            Self::Connected => Some("Waiting for video"),
+            Self::Connecting(Some(step)) => Some(Cow::Borrowed(step.label())),
+            Self::ConfirmPairing(passkey) => Some(Cow::Owned(format!("Pairing code {passkey:06}"))),
+            Self::Connected => Some(Cow::Borrowed("Waiting for video")),
             Self::WaitingForPhone
             | Self::UnlockPhone
             | Self::Connecting(None)
@@ -213,13 +216,26 @@ mod tests {
         assert_eq!(DisplayStatus::WaitingForPhone.detail(), None);
         assert_eq!(DisplayStatus::Connecting(None).detail(), None);
         assert_eq!(
-            DisplayStatus::Connecting(Some(ConnectionStep::SecuringConnection)).detail(),
+            DisplayStatus::Connecting(Some(ConnectionStep::SecuringConnection))
+                .detail()
+                .as_deref(),
             Some("Securing connection")
         );
         assert_eq!(
             DisplayStatus::Connecting(Some(ConnectionStep::Authenticating)).headline(),
             DisplayStatus::Connecting(None).headline()
         );
-        assert_eq!(DisplayStatus::Connected.detail(), Some("Waiting for video"));
+        assert_eq!(
+            DisplayStatus::Connected.detail().as_deref(),
+            Some("Waiting for video")
+        );
+        assert_eq!(
+            DisplayStatus::ConfirmPairing(4_217).detail().as_deref(),
+            Some("Pairing code 004217")
+        );
+        assert_eq!(
+            DisplayStatus::ConfirmPairing(4_217).headline(),
+            DisplayStatus::Connecting(None).headline()
+        );
     }
 }

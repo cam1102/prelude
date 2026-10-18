@@ -41,7 +41,7 @@ fn draw_status(frame: &mut [u8], fonts: &FontSet, status: DisplayStatus) {
         HEADLINE_LUMA,
     );
     if let Some(detail) = status.detail() {
-        draw_line(luma, fonts, detail, DETAIL_Y, DETAIL_SIZE, DETAIL_LUMA);
+        draw_line(luma, fonts, &detail, DETAIL_Y, DETAIL_SIZE, DETAIL_LUMA);
     }
 }
 
@@ -140,6 +140,7 @@ mod tests {
                 "join-wifi",
                 DisplayStatus::Connecting(Some(ConnectionStep::WaitingForIphoneOnWifi)),
             ),
+            ("pairing-code", DisplayStatus::ConfirmPairing(48_213)),
             ("connected", DisplayStatus::Connected),
             ("missing-audio", DisplayStatus::MissingAudioOutput),
         ];

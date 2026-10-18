@@ -151,17 +151,27 @@ impl Write for RfcommConnection {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct PairingPasskeys(Arc<Mutex<Option<(String, u32)>>>);
+pub struct PairingPasskeys {
+    latest: Arc<Mutex<Option<(String, u32)>>>,
+    unshown: Arc<Mutex<Option<(String, u32)>>>,
+}
 
 impl PairingPasskeys {
     fn record(&self, peer: String, passkey: u32) {
-        if let Ok(mut latest) = self.0.lock() {
+        if let Ok(mut unshown) = self.unshown.lock() {
+            *unshown = Some((peer.clone(), passkey));
+        }
+        if let Ok(mut latest) = self.latest.lock() {
             *latest = Some((peer, passkey));
         }
     }
 
+    pub fn take_unshown(&self) -> Option<(String, u32)> {
+        self.unshown.lock().ok()?.take()
+    }
+
     pub fn take(&self, peer: &str) -> Option<u32> {
-        let mut latest = self.0.lock().ok()?;
+        let mut latest = self.latest.lock().ok()?;
         if latest
             .as_ref()
             .is_some_and(|(recorded, _)| recorded.eq_ignore_ascii_case(peer))
@@ -1003,6 +1013,11 @@ mod tests {
         assert_eq!(passkeys.take("AA:BB:CC:DD:EE:FF"), None);
         assert_eq!(passkeys.take("f0:5c:77:12:34:56"), Some(42));
         assert_eq!(passkeys.take("F0:5C:77:12:34:56"), None);
+        assert_eq!(
+            passkeys.take_unshown(),
+            Some(("F0:5C:77:12:34:56".to_owned(), 42))
+        );
+        assert_eq!(passkeys.take_unshown(), None);
     }
 
     #[test]

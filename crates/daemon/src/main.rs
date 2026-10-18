@@ -72,7 +72,11 @@ async fn main() -> Result<()> {
             Error::Runtime(format!("applying persisted host settings failed: {error}"))
         })?;
     config.validate()?;
-    let wireless = if arguments.diagnose {
+    #[cfg_attr(
+        not(all(target_os = "linux", feature = "linux-media")),
+        allow(unused_mut)
+    )]
+    let mut wireless = if arguments.diagnose {
         None
     } else {
         WirelessService::start(&config)?
@@ -166,6 +170,10 @@ async fn main() -> Result<()> {
         discovery =
             discovery.with_wireless(wireless.android_auto_phones(), wireless.carplay_phones());
         info!("wireless projection is enabled");
+    }
+    #[cfg(all(target_os = "linux", feature = "linux-media"))]
+    if let (Some(wireless), Some(display)) = (wireless.as_mut(), display.as_ref()) {
+        wireless.show_pairing_codes(display.handle(), config.state_dir.clone())?;
     }
     let mut daemon = Daemon::new(config, discovery, runtime)?;
 

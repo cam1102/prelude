@@ -23,6 +23,8 @@ mod iap2_runtime;
 mod known_phones;
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
 mod media_runtime;
+#[cfg(all(target_os = "linux", feature = "linux-media"))]
+mod pairing_code;
 mod settings;
 #[cfg(target_os = "linux")]
 mod shared_mfi;
