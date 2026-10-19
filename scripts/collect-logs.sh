@@ -1,10 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-boot="${1:--1}"
-if [[ ! "$boot" =~ ^-?[0-9]+$ ]]; then
+usage() {
     echo "usage: $0 [boot offset, default -1 for the previous boot]" >&2
+    echo "       $0 --long [minutes, default 5]   every past boot that ran at least that long" >&2
     exit 2
+}
+
+if [[ "${1:-}" == "--long" ]]; then
+    minutes="${2:-5}"
+    [[ "$minutes" =~ ^[0-9]+$ ]] || usage
+    selection="long:$minutes"
+else
+    selection="${1:--1}"
+    [[ "$selection" =~ ^-?[0-9]+$ ]] || usage
 fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,7 +47,7 @@ local_script="$(mktemp)"
 trap 'rm -f "$local_script"' EXIT
 
 cat > "$local_script" <<'REMOTE'
-boot="$1"
+selection="$1"
 collected_at="$2"
 
 section() {
@@ -50,8 +59,41 @@ run() {
     "$@" 2>&1
 }
 
+uptime_seconds() {
+    journalctl -b "$1" -r -n 1 -o short-monotonic --no-pager 2>/dev/null |
+        sed -n 's/^\[ *\([0-9]*\)\..*/\1/p'
+}
+
+long_boots() {
+    journalctl --list-boots --no-pager | sed 1d | while read -r index id _; do
+        [ "$index" = 0 ] && continue
+        seconds="$(uptime_seconds "$id")"
+        [ "${seconds:-0}" -ge "$1" ] && printf '%s %s %s\n' "$index" "$id" "$seconds"
+    done
+}
+
+boot_journals() {
+    case "$selection" in
+    long:*)
+        minutes="${selection#long:}"
+        boots="$(long_boots $((minutes * 60)))"
+        if [ -z "$boots" ]; then
+            section "no past boots ran at least $minutes min"
+            return
+        fi
+        printf '%s\n' "$boots" | while read -r index id seconds; do
+            section "journalctl -b $index ($id, up $((seconds / 60)) min $((seconds % 60)) s)"
+            journalctl -b "$id" -o short-precise --no-pager 2>&1
+        done
+        ;;
+    *)
+        run journalctl -b "$selection" -o short-precise --no-pager
+        ;;
+    esac
+}
+
 {
-    printf 'Prelude logs\ncollected at (host time): %s\nboot offset: %s\n' "$collected_at" "$boot"
+    printf 'Prelude logs\ncollected at (host time): %s\nboot selection: %s\n' "$collected_at" "$selection"
     run date -u
     run cat /etc/os-release
     run uname -a
@@ -78,7 +120,7 @@ run() {
         done
     done
 
-    run journalctl -b "$boot" -o short-precise --no-pager
+    boot_journals
     run systemctl --failed --no-pager
     run df -h
     run free
@@ -90,7 +132,7 @@ REMOTE
 
 echo "Collecting logs..."
 "$adb" push "$local_script" "$remote_script" >/dev/null
-"$adb" shell sh "$remote_script" "$boot" "'$(date '+%Y-%m-%d %H:%M:%S %z')'"
+"$adb" shell sh "$remote_script" "$selection" "'$(date '+%Y-%m-%d %H:%M:%S %z')'"
 "$adb" pull "$remote_output" "$output" >/dev/null
 "$adb" shell rm -f "$remote_script" "$remote_output"
 

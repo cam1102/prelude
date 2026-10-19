@@ -1,5 +1,8 @@
 param(
-    [int]$Boot = -1
+    [int]$Boot = -1,
+    [switch]$Long,
+    [ValidateRange(0, [int]::MaxValue)]
+    [int]$Minutes = 5
 )
 
 $ErrorActionPreference = 'Stop'
@@ -41,9 +44,10 @@ $output = Join-Path (Get-Location) "prelude-logs-$timestamp.txt"
 $remoteScript = '/tmp/prelude-collect-logs.sh'
 $remoteOutput = '/tmp/prelude-logs.txt'
 $localScript = [IO.Path]::GetTempFileName()
+$selection = if ($Long) { "long:$Minutes" } else { "$Boot" }
 
 $collector = @'
-boot="$1"
+selection="$1"
 collected_at="$2"
 
 section() {
@@ -55,8 +59,41 @@ run() {
     "$@" 2>&1
 }
 
+uptime_seconds() {
+    journalctl -b "$1" -r -n 1 -o short-monotonic --no-pager 2>/dev/null |
+        sed -n 's/^\[ *\([0-9]*\)\..*/\1/p'
+}
+
+long_boots() {
+    journalctl --list-boots --no-pager | sed 1d | while read -r index id _; do
+        [ "$index" = 0 ] && continue
+        seconds="$(uptime_seconds "$id")"
+        [ "${seconds:-0}" -ge "$1" ] && printf '%s %s %s\n' "$index" "$id" "$seconds"
+    done
+}
+
+boot_journals() {
+    case "$selection" in
+    long:*)
+        minutes="${selection#long:}"
+        boots="$(long_boots $((minutes * 60)))"
+        if [ -z "$boots" ]; then
+            section "no past boots ran at least $minutes min"
+            return
+        fi
+        printf '%s\n' "$boots" | while read -r index id seconds; do
+            section "journalctl -b $index ($id, up $((seconds / 60)) min $((seconds % 60)) s)"
+            journalctl -b "$id" -o short-precise --no-pager 2>&1
+        done
+        ;;
+    *)
+        run journalctl -b "$selection" -o short-precise --no-pager
+        ;;
+    esac
+}
+
 {
-    printf 'Prelude logs\ncollected at (host time): %s\nboot offset: %s\n' "$collected_at" "$boot"
+    printf 'Prelude logs\ncollected at (host time): %s\nboot selection: %s\n' "$collected_at" "$selection"
     run date -u
     run cat /etc/os-release
     run uname -a
@@ -83,7 +120,7 @@ run() {
         done
     done
 
-    run journalctl -b "$boot" -o short-precise --no-pager
+    boot_journals
     run systemctl --failed --no-pager
     run df -h
     run free
@@ -98,7 +135,7 @@ try {
 
     Write-Host 'Collecting logs...'
     Invoke-Adb push $localScript $remoteScript | Out-Null
-    Invoke-Adb shell sh $remoteScript $Boot "'$collectedAt'"
+    Invoke-Adb shell sh $remoteScript $selection "'$collectedAt'"
     Invoke-Adb pull $remoteOutput $output | Out-Null
     Invoke-Adb shell rm -f $remoteScript $remoteOutput
 } finally {
