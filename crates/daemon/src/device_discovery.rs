@@ -50,6 +50,7 @@ impl ProjectionDevice {
 
 pub trait ProjectionDeviceDiscovery: std::fmt::Debug + Send {
     fn scan(&mut self) -> Result<Vec<ProjectionDevice>>;
+    fn choose_wireless(&mut self) {}
 }
 
 #[derive(Debug)]
@@ -66,6 +67,29 @@ pub struct CombinedDeviceDiscovery {
     android_auto_enabled: bool,
     android_vendor_ids: Vec<u16>,
     wireless: Option<WirelessDiscovery>,
+    preference: TransportPreference,
+}
+
+#[derive(Debug, Default)]
+struct TransportPreference {
+    wireless_chosen: bool,
+}
+
+impl TransportPreference {
+    fn choose_wireless(&mut self) {
+        self.wireless_chosen = true;
+    }
+
+    fn observe(&mut self, wired_present: bool) -> (bool, bool) {
+        if !wired_present {
+            self.wireless_chosen = false;
+        }
+        if self.wireless_chosen {
+            (false, true)
+        } else {
+            (true, !wired_present)
+        }
+    }
 }
 
 impl CombinedDeviceDiscovery {
@@ -81,6 +105,7 @@ impl CombinedDeviceDiscovery {
             android_auto_enabled,
             android_vendor_ids,
             wireless: None,
+            preference: TransportPreference::default(),
         }
     }
 
@@ -122,14 +147,18 @@ impl ProjectionDeviceDiscovery for CombinedDeviceDiscovery {
                 .map(ProjectionDevice::AndroidAuto),
             );
         }
-        if let Some(wireless) = &self.wireless {
-            let wired_present = !devices.is_empty();
+        let (show_wired, show_wireless) = self.preference.observe(!devices.is_empty());
+        if !show_wired {
+            devices.clear();
+        }
+        if let Some(wireless) = &self.wireless
+            && show_wireless
+        {
             devices.extend(
                 wireless
                     .carplay
                     .snapshot()
                     .into_iter()
-                    .filter(|phone| !wired_present || phone.is_in_use())
                     .map(ProjectionDevice::WirelessCarPlay),
             );
             devices.extend(
@@ -137,11 +166,36 @@ impl ProjectionDeviceDiscovery for CombinedDeviceDiscovery {
                     .android_auto
                     .snapshot()
                     .into_iter()
-                    .filter(|phone| !wired_present || phone.is_in_use())
                     .map(ProjectionDevice::WirelessAndroidAuto),
             );
         }
         devices.sort_by_key(ProjectionDevice::sort_key);
         Ok(devices)
+    }
+
+    fn choose_wireless(&mut self) {
+        self.preference.choose_wireless();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_wired_phone_hides_wireless_phones() {
+        let mut preference = TransportPreference::default();
+        assert_eq!(preference.observe(false), (true, true));
+        assert_eq!(preference.observe(true), (true, false));
+    }
+
+    #[test]
+    fn choosing_a_wireless_phone_hides_wired_phones_until_they_are_unplugged() {
+        let mut preference = TransportPreference::default();
+        assert_eq!(preference.observe(true), (true, false));
+        preference.choose_wireless();
+        assert_eq!(preference.observe(true), (false, true));
+        assert_eq!(preference.observe(false), (true, true));
+        assert_eq!(preference.observe(true), (true, false));
     }
 }

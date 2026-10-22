@@ -19,7 +19,29 @@ pub struct AutomaticProjectionRuntime {
     carplay: Box<WiredCarkitRuntime>,
     android_auto: Box<AndroidAutoRuntime>,
     wireless_carplay: Option<Box<WirelessCarPlayRuntime>>,
-    active: Option<ActiveProtocol>,
+    active: Option<ActiveSession>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ActiveSession {
+    protocol: ActiveProtocol,
+    wireless: bool,
+}
+
+impl ActiveSession {
+    const fn for_device(device: &ProjectionDevice) -> Self {
+        let protocol = match device {
+            ProjectionDevice::CarPlay(_) => ActiveProtocol::CarPlay,
+            ProjectionDevice::AndroidAuto(_) | ProjectionDevice::WirelessAndroidAuto(_) => {
+                ActiveProtocol::AndroidAuto
+            }
+            ProjectionDevice::WirelessCarPlay(_) => ActiveProtocol::WirelessCarPlay,
+        };
+        Self {
+            protocol,
+            wireless: device.is_wireless(),
+        }
+    }
 }
 
 impl AutomaticProjectionRuntime {
@@ -90,7 +112,8 @@ impl AutomaticProjectionRuntime {
     }
 
     fn active_runtime(&mut self) -> Option<&mut dyn ProjectionRuntime> {
-        self.active.and_then(|protocol| self.runtime(protocol))
+        self.active
+            .and_then(|session| self.runtime(session.protocol))
     }
 
     fn stop_active(&mut self) -> Result<()> {
@@ -98,6 +121,18 @@ impl AutomaticProjectionRuntime {
             return Ok(());
         };
         runtime.stop()?;
+        self.active = None;
+        Ok(())
+    }
+
+    fn hand_off(&mut self, requested: ActiveSession) -> Result<()> {
+        if let Some(incoming) = self.runtime(requested.protocol) {
+            incoming.begin_handoff();
+        }
+        let Some(runtime) = self.active_runtime() else {
+            return Ok(());
+        };
+        runtime.stop_for_handoff()?;
         self.active = None;
         Ok(())
     }
@@ -135,17 +170,13 @@ impl ProjectionRuntime for AutomaticProjectionRuntime {
     }
 
     fn start(&mut self, device: &ProjectionDevice) -> Result<()> {
-        let requested = match device {
-            ProjectionDevice::CarPlay(_) => ActiveProtocol::CarPlay,
-            ProjectionDevice::AndroidAuto(_) | ProjectionDevice::WirelessAndroidAuto(_) => {
-                ActiveProtocol::AndroidAuto
-            }
-            ProjectionDevice::WirelessCarPlay(_) => ActiveProtocol::WirelessCarPlay,
-        };
-        if self.active.is_some_and(|active| active != requested) {
-            self.stop_active()?;
+        let requested = ActiveSession::for_device(device);
+        match self.active {
+            Some(active) if active.wireless && !requested.wireless => self.hand_off(requested)?,
+            Some(active) if active != requested => self.stop_active()?,
+            _ => {}
         }
-        self.runtime(requested)
+        self.runtime(requested.protocol)
             .ok_or(crate::Error::Unsupported(
                 "wireless CarPlay is not enabled in this configuration",
             ))?
@@ -172,5 +203,18 @@ impl ProjectionRuntime for AutomaticProjectionRuntime {
 
     fn stop(&mut self) -> Result<()> {
         self.stop_active()
+    }
+
+    fn holds_usb_session(&mut self) -> bool {
+        self.active.is_some_and(|active| !active.wireless)
+            && matches!(
+                self.probe().transport_state,
+                HealthState::Starting | HealthState::Ready
+            )
+    }
+
+    fn yields_to(&self, device: &ProjectionDevice) -> bool {
+        self.active
+            .is_some_and(|active| active.wireless && !device.is_wireless())
     }
 }

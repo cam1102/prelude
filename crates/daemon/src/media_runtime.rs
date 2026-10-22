@@ -21,8 +21,8 @@ use prelude_media::{
     LinuxMicrophoneBackend, LinuxMicrophoneBackendConfig, LinuxVideoBackend,
     LinuxVideoBackendConfig, MicrophoneBackendEvent, MicrophoneCodec, MicrophoneConfig,
     MicrophoneInputRoute, MicrophonePacketizer, NtpTimestamp, ScreenWireDecoder, ScreenWireEvent,
-    ScreenWireLimits, TimingCodec, TimingEvent, UsbDacMatcher, VideoSynchronizationTelemetry,
-    VideoSynchronizationTelemetrySnapshot,
+    ScreenWireLimits, TimingCodec, TimingEvent, UsbDacMatcher, VideoBackendEvent,
+    VideoSynchronizationTelemetry, VideoSynchronizationTelemetrySnapshot,
 };
 use prelude_net::{
     AudioDescriptor, AudioFeedbackAnchor, AudioFeedbackStream, AudioStreamKind, FlushPoint,
@@ -1898,6 +1898,12 @@ fn screen_worker(context: ScreenWorkerContext) -> Result<(), String> {
                         .nal_units
                         .iter()
                         .any(|descriptor| descriptor.unit_type == 5);
+                    if frame_ordinal == 1 {
+                        tracing::info!(
+                            idr,
+                            "the first CarPlay video frame arrived from the iPhone"
+                        );
+                    }
                     if frame_ordinal <= 20 || idr {
                         let nal_types = frame
                             .nal_units
@@ -1956,11 +1962,14 @@ fn poll_video_backend(
     {
         return Err(format!("{} failed: {}", failure.component, failure.message));
     }
-    if active
+    while let Some(event) = active
         .try_event()
         .map_err(|error| format!("polling video backend events failed: {error}"))?
-        .is_some()
     {
+        if event == VideoBackendEvent::FirstFrameRendered {
+            tracing::info!("the first CarPlay video frame is on screen");
+            continue;
+        }
         match event_commands.try_send(EventWorkerCommand::ForceKeyFrame) {
             Ok(()) => {
                 tracing::info!("requesting a clean CarPlay keyframe for the hardware decoder");

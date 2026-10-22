@@ -454,12 +454,45 @@ impl std::fmt::Debug for Iap2Config {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CarPlayDock {
+    #[default]
+    Left,
+    Right,
+    Bottom,
+}
+
+impl CarPlayDock {
+    pub const ALL: [Self; 3] = [Self::Left, Self::Right, Self::Bottom];
+
+    pub const fn right_hand_drive(self) -> bool {
+        matches!(self, Self::Right)
+    }
+
+    pub const fn status_bar_edge(self) -> u64 {
+        match self {
+            Self::Left | Self::Right => 2,
+            Self::Bottom => 1,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Left => "Left",
+            Self::Right => "Right",
+            Self::Bottom => "Bottom",
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AirPlayConfig {
     pub enable_live_receiver: bool,
     pub enable_live_input: bool,
     pub disable_audio_output: bool,
+    pub dock: CarPlayDock,
     pub setup_code_file: Option<PathBuf>,
     pub display_width_physical_mm: u16,
     pub display_height_physical_mm: u16,
@@ -476,6 +509,7 @@ impl Default for AirPlayConfig {
             enable_live_receiver: false,
             enable_live_input: false,
             disable_audio_output: false,
+            dock: CarPlayDock::Left,
             setup_code_file: None,
             display_width_physical_mm: 86,
             display_height_physical_mm: 52,
@@ -495,6 +529,7 @@ impl std::fmt::Debug for AirPlayConfig {
             .field("enable_live_receiver", &self.enable_live_receiver)
             .field("enable_live_input", &self.enable_live_input)
             .field("disable_audio_output", &self.disable_audio_output)
+            .field("dock", &self.dock)
             .field(
                 "setup_code_file_configured",
                 &self.setup_code_file.is_some(),

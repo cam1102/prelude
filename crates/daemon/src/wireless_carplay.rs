@@ -163,6 +163,7 @@ struct WirelessLinks {
     access_point: SharedAccessPoint,
     bluetooth_address: SharedBluetoothAddress,
     bluetooth_control: SharedBluetoothControl,
+    page_now: Arc<AtomicBool>,
 }
 
 pub struct WirelessCarPlayRuntime {
@@ -226,6 +227,7 @@ impl WirelessCarPlayRuntime {
                 access_point: wireless.shared_access_point(),
                 bluetooth_address: wireless.shared_bluetooth_address(),
                 bluetooth_control: wireless.shared_bluetooth_control(),
+                page_now: wireless.shared_page_now(),
             },
             identity_source_failure,
             connection: Connection::Idle,
@@ -449,6 +451,10 @@ impl ProjectionRuntime for WirelessCarPlayRuntime {
                     ))
                 },
             )?;
+            #[cfg(all(target_os = "linux", feature = "linux-media"))]
+            {
+                self.display_status = None;
+            }
             let progress = SharedProgress::default();
             let cancel = Arc::new(AtomicBool::new(false));
             let worker = Worker {
@@ -483,9 +489,14 @@ impl ProjectionRuntime for WirelessCarPlayRuntime {
     }
 
     fn stop(&mut self) -> Result<()> {
-        if let Connection::Worker { handle, cancel, .. } =
-            std::mem::replace(&mut self.connection, Connection::Idle)
-        {
+        self.stop_for_handoff()?;
+        #[cfg(all(target_os = "linux", feature = "linux-media"))]
+        self.update_display();
+        Ok(())
+    }
+
+    fn stop_for_handoff(&mut self) -> Result<()> {
+        if let Connection::Worker { handle, cancel, .. } = &self.connection {
             cancel.store(true, Ordering::Relaxed);
             let deadline = Instant::now() + WORKER_STOP_WAIT;
             while !handle.is_finished() && Instant::now() < deadline {
@@ -493,19 +504,27 @@ impl ProjectionRuntime for WirelessCarPlayRuntime {
             }
             if !handle.is_finished() {
                 return Err(Error::Runtime(
-                    "wireless CarPlay worker did not stop in time".to_owned(),
+                    "wireless CarPlay worker did not stop in time; ownership was retained"
+                        .to_owned(),
                 ));
             }
-            handle
-                .join()
-                .map_err(|_| Error::Runtime("wireless CarPlay worker panicked".to_owned()))?
-                .map_err(Error::Runtime)?;
+        }
+        if let Connection::Worker { handle, .. } =
+            std::mem::replace(&mut self.connection, Connection::Idle)
+        {
+            match handle.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "wireless CarPlay session ended with an error while stopping");
+                }
+                Err(_) => tracing::warn!("wireless CarPlay worker panicked while stopping"),
+            }
         }
         self.last_failure = None;
         #[cfg(all(target_os = "linux", feature = "linux-media"))]
         {
             self.phone_present = false;
-            self.update_display();
+            self.display_status = None;
         }
         Ok(())
     }
@@ -538,9 +557,36 @@ impl Worker {
         connection: RfcommConnection,
         lease: WirelessLease,
     ) -> std::result::Result<(), String> {
+        let peer = connection.peer.clone();
         let result = self.run_session(connection);
         drop(lease);
+        if result.is_err() && !self.cancel.load(Ordering::Relaxed) && !self.reached_active() {
+            self.ask_the_iphone_to_retry(&peer);
+        }
         result
+    }
+
+    fn reached_active(&self) -> bool {
+        self.progress
+            .lock()
+            .is_ok_and(|progress| progress.stage == Stage::Active)
+    }
+
+    fn ask_the_iphone_to_retry(&self, peer: &str) {
+        if let Some(control) = self
+            .links
+            .bluetooth_control
+            .read()
+            .ok()
+            .and_then(|control| control.clone())
+        {
+            control.disconnect(peer);
+        }
+        self.links.page_now.store(true, Ordering::Release);
+        tracing::info!(
+            peer,
+            "wireless CarPlay failed during setup; asking the iPhone to reconnect"
+        );
     }
 
     fn run_session(&self, connection: RfcommConnection) -> std::result::Result<(), String> {

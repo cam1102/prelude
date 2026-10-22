@@ -20,13 +20,14 @@
     "widthPhysical": 86,
     "heightPhysical": 52,
     "features": 10,
-    "primaryInputDevice": 3,
+    "primaryInputDevice": 1,
     "initialViewArea": 0,
     "viewArea": {
       "widthPixels": 800,
       "heightPixels": 480,
       "originXPixels": 0,
-      "originYPixels": 0
+      "originYPixels": 0,
+      "viewAreaStatusBarEdge": 2
     }
   },
   "resourceIDs": [1],

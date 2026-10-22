@@ -140,6 +140,10 @@ mod tests {
                 "join-wifi",
                 DisplayStatus::Connecting(Some(ConnectionStep::WaitingForIphoneOnWifi)),
             ),
+            (
+                "switching-to-usb",
+                DisplayStatus::Connecting(Some(ConnectionStep::SwitchingToUsb)),
+            ),
             ("pairing-code", DisplayStatus::ConfirmPairing(48_213)),
             ("connected", DisplayStatus::Connected),
             ("missing-audio", DisplayStatus::MissingAudioOutput),

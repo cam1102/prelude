@@ -44,9 +44,9 @@ pub use audio_status::{
 };
 pub use automatic_runtime::AutomaticProjectionRuntime;
 pub use config::{
-    AirPlayConfig, AndroidAutoConfig, AudioBackend, DaemonConfig, DiagnosticLevel, Iap2Config,
-    MediaConfig, PlatformConfig, ProjectionConfig, ProjectionMode, UsbConfig, UsbDacConfig,
-    VideoBackend, WirelessConfig,
+    AirPlayConfig, AndroidAutoConfig, AudioBackend, CarPlayDock, DaemonConfig, DiagnosticLevel,
+    Iap2Config, MediaConfig, PlatformConfig, ProjectionConfig, ProjectionMode, UsbConfig,
+    UsbDacConfig, VideoBackend, WirelessConfig,
 };
 pub use daemon::{Daemon, ProjectionRuntime, RuntimeProbe, UnsupportedProjectionRuntime};
 pub use device_discovery::{CombinedDeviceDiscovery, ProjectionDevice, ProjectionDeviceDiscovery};

@@ -198,6 +198,22 @@ impl ProjectionRuntime for SelectedRuntime {
             Self::Wired(runtime) => runtime.stop(),
         }
     }
+
+    fn yields_to(&self, device: &ProjectionDevice) -> bool {
+        match self {
+            Self::Unsupported(runtime) => runtime.yields_to(device),
+            Self::Automatic(runtime) => runtime.yields_to(device),
+            Self::Wired(runtime) => runtime.yields_to(device),
+        }
+    }
+
+    fn holds_usb_session(&mut self) -> bool {
+        match self {
+            Self::Unsupported(runtime) => runtime.holds_usb_session(),
+            Self::Automatic(runtime) => runtime.holds_usb_session(),
+            Self::Wired(runtime) => runtime.holds_usb_session(),
+        }
+    }
 }
 
 pub struct WiredCarkitRuntime {
@@ -217,6 +233,8 @@ pub struct WiredCarkitRuntime {
     display: Option<prelude_media::LinuxDisplayHandle>,
     #[cfg(all(target_os = "linux", feature = "linux-media"))]
     display_status: Option<DisplayStatus>,
+    #[cfg(all(target_os = "linux", feature = "linux-media"))]
+    handoff: bool,
     identity_source_failure: Option<String>,
     connection: RuntimeConnection,
     phone_present: bool,
@@ -353,6 +371,8 @@ impl WiredCarkitRuntime {
             display,
             #[cfg(all(target_os = "linux", feature = "linux-media"))]
             display_status: None,
+            #[cfg(all(target_os = "linux", feature = "linux-media"))]
+            handoff: false,
             identity_source_failure,
             connection: RuntimeConnection::Idle,
             phone_present: false,
@@ -693,6 +713,10 @@ impl ProjectionRuntime for WiredCarkitRuntime {
         self.refresh();
         #[cfg(all(target_os = "linux", feature = "linux-media"))]
         {
+            if !matches!(self.connection, RuntimeConnection::Worker { .. }) {
+                self.handoff = false;
+            }
+            let handoff = self.handoff;
             let status = if !self.phone_present {
                 Some(DisplayStatus::WaitingForPhone)
             } else {
@@ -703,7 +727,7 @@ impl ProjectionRuntime for WiredCarkitRuntime {
                             if progress.audio_output_missing {
                                 DisplayStatus::MissingAudioOutput
                             } else {
-                                carplay_display_status(progress.stage)
+                                carplay_display_status(progress.stage, handoff)
                             }
                         })
                     }
@@ -738,10 +762,23 @@ impl ProjectionRuntime for WiredCarkitRuntime {
     }
 
     fn set_phone_presence(&mut self, present: bool) {
+        #[cfg(target_os = "linux")]
+        let present = present || matches!(self.connection, RuntimeConnection::Worker { .. });
         self.phone_present = present;
         #[cfg(all(target_os = "linux", feature = "linux-media"))]
         if !present {
             let _ = self.set_display_status(DisplayStatus::WaitingForPhone);
+        }
+    }
+
+    fn begin_handoff(&mut self) {
+        #[cfg(all(target_os = "linux", feature = "linux-media"))]
+        {
+            self.handoff = true;
+            self.display_status = None;
+            let _ = self.set_display_status(DisplayStatus::Connecting(Some(
+                ConnectionStep::SwitchingToUsb,
+            )));
         }
     }
 
@@ -834,7 +871,13 @@ impl ProjectionRuntime for WiredCarkitRuntime {
                 },
             )?;
             #[cfg(all(target_os = "linux", feature = "linux-media"))]
-            self.set_display_status(DisplayStatus::UnlockPhone)?;
+            {
+                self.display_status = None;
+                self.set_display_status(carplay_display_status(
+                    WorkerStage::ConnectingCarrier,
+                    self.handoff,
+                ))?;
+            }
             self.phone_present = true;
             let handle = match thread::Builder::new()
                 .name("prelude-iap2".to_owned())
@@ -949,7 +992,11 @@ impl ProjectionRuntime for WiredCarkitRuntime {
         self.last_failure = None;
         self.reconnect.record_success();
         #[cfg(all(target_os = "linux", feature = "linux-media"))]
-        self.set_display_status(DisplayStatus::WaitingForPhone)?;
+        {
+            self.handoff = false;
+            self.display_status = None;
+            self.set_display_status(DisplayStatus::WaitingForPhone)?;
+        }
         Ok(())
     }
 }
@@ -1357,8 +1404,11 @@ fn run_live_worker(
 
 #[cfg(target_os = "linux")]
 fn set_progress(progress: &SharedProgress, stage: WorkerStage) {
-    if let Ok(mut current) = progress.lock() {
+    if let Ok(mut current) = progress.lock()
+        && current.stage != stage
+    {
         current.stage = stage;
+        tracing::info!(?stage, "wired CarPlay worker stage");
     }
 }
 
@@ -1573,8 +1623,9 @@ fn worker_probe(progress: &SharedProgress, config: &crate::Iap2Config) -> Runtim
 }
 
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
-fn carplay_display_status(stage: WorkerStage) -> DisplayStatus {
+fn carplay_display_status(stage: WorkerStage, handoff: bool) -> DisplayStatus {
     let step = match stage {
+        WorkerStage::ConnectingCarrier if handoff => ConnectionStep::SwitchingToUsb,
         WorkerStage::ConnectingCarrier => return DisplayStatus::UnlockPhone,
         WorkerStage::BringingUpNcm => ConnectionStep::StartingUsbNetwork,
         WorkerStage::OpeningMfi => ConnectionStep::PreparingAuthentication,
@@ -1801,6 +1852,23 @@ mod tests {
         config.projection.mode = ProjectionMode::ExperimentalPrivateProtocol;
         config.projection.allow_experimental_private_protocol = true;
         (directory, config)
+    }
+
+    #[cfg(all(target_os = "linux", feature = "linux-media"))]
+    #[test]
+    fn a_wireless_handoff_says_switching_to_usb_instead_of_unlock_your_phone() {
+        assert_eq!(
+            carplay_display_status(WorkerStage::ConnectingCarrier, false),
+            DisplayStatus::UnlockPhone
+        );
+        assert_eq!(
+            carplay_display_status(WorkerStage::ConnectingCarrier, true),
+            DisplayStatus::Connecting(Some(ConnectionStep::SwitchingToUsb))
+        );
+        assert_eq!(
+            carplay_display_status(WorkerStage::Setup, true),
+            DisplayStatus::Connecting(Some(ConnectionStep::Authenticating))
+        );
     }
 
     #[test]

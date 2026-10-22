@@ -513,6 +513,8 @@ impl ProjectionRuntime for AndroidAutoRuntime {
     }
 
     fn set_phone_presence(&mut self, present: bool) {
+        #[cfg(all(target_os = "linux", feature = "linux-media"))]
+        let present = present || matches!(self.connection, RuntimeConnection::Worker { .. });
         self.phone_present = present;
         if !present {
             self.missing_audio_output = false;
@@ -648,6 +650,7 @@ impl ProjectionRuntime for AndroidAutoRuntime {
                     ))
                 },
             )?;
+            self.display_status = None;
             self.set_display_status(DisplayStatus::Connecting(None))?;
             self.missing_audio_output = false;
             let handle = match thread::Builder::new()
@@ -689,7 +692,24 @@ impl ProjectionRuntime for AndroidAutoRuntime {
         }
     }
 
+    fn begin_handoff(&mut self) {
+        #[cfg(all(target_os = "linux", feature = "linux-media"))]
+        {
+            self.display_status = None;
+            let _ = self.set_display_status(DisplayStatus::Connecting(Some(
+                ConnectionStep::SwitchingToUsb,
+            )));
+        }
+    }
+
     fn stop(&mut self) -> Result<()> {
+        self.stop_for_handoff()?;
+        #[cfg(all(target_os = "linux", feature = "linux-media"))]
+        self.set_display_status(DisplayStatus::WaitingForPhone)?;
+        Ok(())
+    }
+
+    fn stop_for_handoff(&mut self) -> Result<()> {
         #[cfg(all(target_os = "linux", feature = "linux-media"))]
         {
             if let RuntimeConnection::Worker {
@@ -737,7 +757,9 @@ impl ProjectionRuntime for AndroidAutoRuntime {
             };
         });
         #[cfg(all(target_os = "linux", feature = "linux-media"))]
-        self.set_display_status(DisplayStatus::WaitingForPhone)?;
+        {
+            self.display_status = None;
+        }
         Ok(())
     }
 }
@@ -1700,7 +1722,7 @@ impl LiveMedia {
                         LinuxVideoBackendConfig::default(),
                         configuration.clone(),
                         self.video_telemetry.clone(),
-                        self.display.take(),
+                        self.display.clone(),
                     )
                     .map_err(|error| {
                         format!("starting Android Auto video backend failed: {error}")
@@ -2000,6 +2022,9 @@ impl LiveMedia {
                             progress.keyframe_requests =
                                 progress.keyframe_requests.saturating_add(1);
                         });
+                    }
+                    VideoBackendEvent::FirstFrameRendered => {
+                        tracing::info!("the first Android Auto video frame is on screen");
                     }
                 }
             }

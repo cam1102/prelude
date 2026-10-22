@@ -161,6 +161,22 @@ const MAXIMUM_PENDING_EVENT_RESPONSES: usize = 256;
 const RECORD_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const PEER_SILENCE_TIMEOUT: Duration = Duration::from_secs(15);
 const CONTROL_SETUP_TIMEOUT: Duration = Duration::from_secs(30);
+const TENTATIVE_ADDRESS_WAIT: Duration = Duration::from_secs(3);
+const TENTATIVE_ADDRESS_POLL: Duration = Duration::from_millis(100);
+
+fn bind_once_the_address_settles(bind_address: &ScopedBindAddress) -> io::Result<TcpListener> {
+    let deadline = Instant::now() + TENTATIVE_ADDRESS_WAIT;
+    loop {
+        match bind_address.tcp_listener() {
+            Err(error)
+                if error.kind() == io::ErrorKind::AddrNotAvailable && Instant::now() < deadline =>
+            {
+                thread::sleep(TENTATIVE_ADDRESS_POLL);
+            }
+            result => return result,
+        }
+    }
+}
 
 pub(crate) enum EventWorkerCommand {
     SetNightMode {
@@ -876,13 +892,14 @@ impl AirPlayRuntime {
             audio_formats = if advertised_media_claims.audio { 9 } else { 0 },
             audio_latencies = if advertised_media_claims.audio { 9 } else { 0 },
             microphone = advertised_media_claims.microphone,
+            dock = ?config.dock,
             "built AirPlay /info capability declaration"
         );
         let scope_id = nix::net::if_::if_nametoindex(interface_name).map_err(|error| {
             format!("resolving the selected NCM interface index failed: {error}")
         })?;
         let bind_address = ScopedBindAddress::production(link_local, scope_id)?;
-        let listener = bind_address.tcp_listener().map_err(|error| {
+        let listener = bind_once_the_address_settles(&bind_address).map_err(|error| {
             format!("binding the scoped AirPlay control listener failed: {error}")
         })?;
         let service_port = listener
@@ -2486,7 +2503,10 @@ fn build_info_payload(
     );
     info.insert("deviceID".to_owned(), Value::String(format_mac(host_mac)));
     info.insert("name".to_owned(), Value::String(name.to_owned()));
-    info.insert("rightHandDrive".to_owned(), Value::Boolean(false));
+    info.insert(
+        "rightHandDrive".to_owned(),
+        Value::Boolean(config.dock.right_hand_drive()),
+    );
     info.insert("keepAliveLowPower".to_owned(), Value::Boolean(true));
     info.insert("keepAliveSendStatsAsBody".to_owned(), Value::Boolean(false));
     info.insert(
@@ -2655,7 +2675,7 @@ fn main_display(config: &AirPlayConfig) -> Dictionary {
         Value::from(u64::from(config.display_height_physical_mm)),
     );
     display.insert("features".to_owned(), Value::from(0x0a_u64));
-    display.insert("primaryInputDevice".to_owned(), Value::from(3_u64));
+    display.insert("primaryInputDevice".to_owned(), Value::from(1_u64));
     let mut view_area = Dictionary::new();
     view_area.insert("widthPixels".to_owned(), Value::from(DISPLAY_WIDTH_PIXELS));
     view_area.insert(
@@ -2664,6 +2684,10 @@ fn main_display(config: &AirPlayConfig) -> Dictionary {
     );
     view_area.insert("originXPixels".to_owned(), Value::from(0_u64));
     view_area.insert("originYPixels".to_owned(), Value::from(0_u64));
+    view_area.insert(
+        "viewAreaStatusBarEdge".to_owned(),
+        Value::from(config.dock.status_bar_edge()),
+    );
     display.insert(
         "viewAreas".to_owned(),
         Value::Array(vec![Value::Dictionary(view_area)]),
@@ -2761,7 +2785,7 @@ mod tests {
     };
     use tempfile::TempDir;
 
-    use crate::{DaemonConfig, RuntimeSettings};
+    use crate::{CarPlayDock, DaemonConfig, RuntimeSettings};
 
     use super::*;
 
@@ -3350,6 +3374,7 @@ mod tests {
             "heightPixels",
             "originXPixels",
             "originYPixels",
+            "viewAreaStatusBarEdge",
         ] {
             assert_eq!(
                 view_area.get(key).and_then(Value::as_unsigned_integer),
@@ -3441,6 +3466,64 @@ mod tests {
                 .and_then(Value::as_unsigned_integer),
             Some(55)
         );
+    }
+
+    #[test]
+    fn every_dock_choice_declares_an_explicit_status_bar_edge() {
+        let identity = Iap2Config {
+            accessory_name: Some("Prelude".to_owned()),
+            model_identifier: Some("Prelude".to_owned()),
+            manufacturer: Some("Vanta Labs".to_owned()),
+            ..Iap2Config::default()
+        };
+        for (dock, right_hand_drive, edge) in [
+            (CarPlayDock::Left, false, 2),
+            (CarPlayDock::Right, true, 2),
+            (CarPlayDock::Bottom, false, 1),
+        ] {
+            let config = AirPlayConfig {
+                dock,
+                ..AirPlayConfig::default()
+            };
+            let payload = build_info_payload(
+                &config,
+                &identity,
+                [0x02, 0x11, 0x22, 0x33, 0x44, 0x55],
+                false,
+                ReceiverMediaClaims {
+                    screen: true,
+                    audio: false,
+                    microphone: false,
+                },
+            )
+            .expect("info");
+            let decoded = Value::from_reader(Cursor::new(payload.as_bytes()))
+                .expect("binary plist")
+                .into_dictionary()
+                .expect("dictionary");
+            assert_eq!(
+                decoded.get("rightHandDrive").and_then(Value::as_boolean),
+                Some(right_hand_drive),
+                "{dock:?}"
+            );
+            let view_area = decoded
+                .get("displays")
+                .and_then(Value::as_array)
+                .and_then(|displays| displays.first())
+                .and_then(Value::as_dictionary)
+                .and_then(|display| display.get("viewAreas"))
+                .and_then(Value::as_array)
+                .and_then(|areas| areas.first())
+                .and_then(Value::as_dictionary)
+                .expect("main display view area");
+            assert_eq!(
+                view_area
+                    .get("viewAreaStatusBarEdge")
+                    .and_then(Value::as_unsigned_integer),
+                Some(edge),
+                "{dock:?}"
+            );
+        }
     }
 
     #[test]

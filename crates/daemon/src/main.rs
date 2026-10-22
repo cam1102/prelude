@@ -310,6 +310,7 @@ async fn main() -> Result<()> {
                     continue;
                 }
             };
+            let was_wireless = daemon.has_wireless_phone();
             if let Err(error) =
                 daemon.replace_projection_runtime(candidate_config, candidate_runtime)
             {
@@ -318,22 +319,20 @@ async fn main() -> Result<()> {
                 info!("restarted the projection runtime after settings changed");
                 if let Some(wireless) = &wireless {
                     wireless.set_phone_audio(event.settings.phone_audio);
+                    if was_wireless {
+                        wireless.reconnect_last_phone();
+                    }
                 }
             }
         }
 
-        #[cfg(all(target_os = "linux", feature = "linux-media"))]
-        let settings_open = display
-            .as_ref()
-            .is_some_and(|runtime| runtime.handle().host_ui_active());
-        #[cfg(not(all(target_os = "linux", feature = "linux-media")))]
-        let settings_open = false;
-        if !settings_open {
-            match daemon.maintain_projection() {
-                Ok(true) => info!("started bounded wired phone-projection session worker"),
-                Ok(false) => {}
-                Err(error) => debug!(%error, "wired carrier/iAP2 session is not ready"),
-            }
+        match daemon.maintain_projection() {
+            Ok(true) => info!("started bounded wired phone-projection session worker"),
+            Ok(false) => {}
+            Err(error) => debug!(%error, "wired carrier/iAP2 session is not ready"),
+        }
+        if let Some(wireless) = &wireless {
+            wireless.set_usb_projection(daemon.projecting_over_usb());
         }
         #[cfg(all(target_os = "linux", feature = "linux-media"))]
         {
@@ -409,6 +408,9 @@ fn connect_phone(
     directory: &WirelessPhoneDirectory,
     address: &str,
 ) {
+    if let Err(error) = daemon.choose_wireless() {
+        warn!(%error, "could not stop the USB phone's session");
+    }
     if let Some(active) = directory.active().filter(|active| active != address) {
         if let Err(error) = daemon.stop() {
             warn!(%error, "could not stop the current phone's session");

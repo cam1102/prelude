@@ -27,9 +27,10 @@ use prelude_wireless::{
 };
 
 use crate::{
-    DaemonConfig, Error, Result, WirelessConfig,
+    DaemonConfig, DisplayPlatform, Error, Result, WirelessConfig,
     hands_free::HandsFree,
     known_phones::{self, KnownPhone},
+    load_last_display_platform,
 };
 
 const SUPERVISOR_POLL: Duration = Duration::from_millis(100);
@@ -37,8 +38,10 @@ const ACCESS_POINT_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const ACCESS_POINT_RETRY: Duration = Duration::from_secs(5);
 const BLUETOOTH_RETRY: Duration = Duration::from_secs(5);
 const BLUETOOTH_START_RETRY: Duration = Duration::from_secs(1);
-const RECONNECT_DELAY: Duration = Duration::from_secs(3);
+const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(20);
+const MINIMUM_PAGE_GAP: Duration = Duration::from_secs(5);
+const HAND_BACK_FOCUS: Duration = Duration::from_secs(20);
 const FOCUS_WINDOW: Duration = Duration::from_secs(60);
 const ACCESS_POINT_WAIT: Duration = Duration::from_secs(20);
 const RFCOMM_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -223,7 +226,7 @@ impl<T> WirelessPhones<T> {
         self.ended_by_phone.swap(false, Ordering::AcqRel)
     }
 
-    fn offer(&self, connection: T, peer: String) -> bool {
+    pub(crate) fn offer(&self, connection: T, peer: String) -> bool {
         let Ok(mut phones) = self.phones.lock() else {
             return false;
         };
@@ -393,6 +396,22 @@ impl WirelessPhoneDirectory {
     }
 }
 
+fn page_target(
+    phones: Vec<KnownPhone>,
+    last_platform: Option<DisplayPlatform>,
+) -> Option<KnownPhone> {
+    let kind = last_platform.map(|platform| match platform {
+        DisplayPlatform::CarPlay => PhoneKind::CarPlay,
+        DisplayPlatform::AndroidAuto => PhoneKind::AndroidAuto,
+    });
+    let preferred = kind.and_then(|kind| phones.iter().position(|phone| phone.kind == kind));
+    let mut phones = phones;
+    match preferred {
+        Some(index) => Some(phones.swap_remove(index)),
+        None => phones.into_iter().next(),
+    }
+}
+
 fn current_stations(access_point: &SharedAccessPoint) -> Option<StationControl> {
     access_point
         .read()
@@ -470,6 +489,10 @@ pub struct WirelessService {
         allow(dead_code)
     )]
     passkeys: PairingPasskeys,
+    page_now: Arc<AtomicBool>,
+    hand_back: Arc<AtomicBool>,
+    usb_ended: Arc<AtomicBool>,
+    usb_projection: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
 }
@@ -489,6 +512,10 @@ impl WirelessService {
         let phone_audio = Arc::new(AtomicBool::new(config.android_auto.disable_audio_output));
         let wifi_present = Arc::new(AtomicBool::new(wifi_interface(wireless).is_some()));
         let passkeys = PairingPasskeys::default();
+        let page_now = Arc::new(AtomicBool::new(false));
+        let usb_projection = Arc::new(AtomicBool::new(false));
+        let hand_back = Arc::new(AtomicBool::new(false));
+        let usb_ended = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
         let state_dir = wireless_state_dir(&config.state_dir);
         let hands_free = HandsFree::new(
@@ -519,6 +546,7 @@ impl WirelessService {
                 station: Arc::clone(&directory.android_auto_station),
                 denied: Arc::clone(&directory.denied),
                 read_timeout: Duration::from_millis(config.android_auto.session_io_timeout_ms),
+                usb_projection: Arc::clone(&usb_projection),
             };
             let access_point = Arc::clone(&access_point);
             let radio = Arc::clone(&radio);
@@ -562,6 +590,11 @@ impl WirelessService {
                 passkeys: passkeys.clone(),
                 hands_free: hands_free.clone(),
                 state_dir,
+                platform_state_dir: config.state_dir.clone(),
+                page_now: Arc::clone(&page_now),
+                hand_back: Arc::clone(&hand_back),
+                usb_ended: Arc::clone(&usb_ended),
+                usb_projection: Arc::clone(&usb_projection),
                 stop: Arc::clone(&stop),
             };
             move || dispatch.run(&bluetooth)
@@ -584,6 +617,10 @@ impl WirelessService {
             phone_audio,
             hands_free,
             passkeys,
+            page_now,
+            hand_back,
+            usb_ended,
+            usb_projection,
             stop,
             threads,
         }))
@@ -610,6 +647,31 @@ impl WirelessService {
     pub fn set_radio(&self, channel: u8, width: ChannelWidth) {
         if let Ok(mut radio) = self.radio.write() {
             *radio = (channel, width.mhz());
+        }
+    }
+
+    pub fn reconnect_last_phone(&self) {
+        self.page_now.store(true, Ordering::Release);
+    }
+
+    pub fn set_usb_projection(&self, active: bool) {
+        if self.usb_projection.swap(active, Ordering::AcqRel) == active {
+            return;
+        }
+        if active {
+            tracing::info!("a phone is projecting over USB; taking the wireless hotspot down");
+            self.android_auto.take_ended_by_phone();
+            for queued in self.carplay.snapshot() {
+                drop(queued.claim());
+            }
+            for queued in self.android_auto.snapshot() {
+                drop(queued.claim());
+            }
+        } else {
+            tracing::info!("USB projection ended; restoring the wireless hotspot");
+            self.usb_ended.store(true, Ordering::Release);
+            self.hand_back.store(true, Ordering::Release);
+            self.page_now.store(true, Ordering::Release);
         }
     }
 
@@ -643,6 +705,10 @@ impl WirelessService {
 
     pub(crate) fn shared_bluetooth_control(&self) -> SharedBluetoothControl {
         Arc::clone(&self.bluetooth_control)
+    }
+
+    pub(crate) fn shared_page_now(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.page_now)
     }
 
     pub fn access_point(&self) -> Option<AccessPointInfo> {
@@ -710,6 +776,7 @@ struct ProjectionListener {
     station: SharedStation,
     denied: SharedDenied,
     read_timeout: Duration,
+    usb_projection: Arc<AtomicBool>,
 }
 
 fn supervise_access_point(
@@ -721,8 +788,13 @@ fn supervise_access_point(
     wifi_present: &AtomicBool,
     stop: &AtomicBool,
 ) {
+    let usb_projection = &projection.usb_projection;
     let mut waiting_logged = false;
     while !stop.load(Ordering::Relaxed) {
+        if usb_projection.load(Ordering::Acquire) {
+            sleep_unless_stopped(stop, SUPERVISOR_POLL);
+            continue;
+        }
         let (channel, channel_width_mhz) = current_radio(radio, wireless);
         let wireless = WirelessConfig {
             channel,
@@ -755,6 +827,9 @@ fn supervise_access_point(
                 channel_width_mhz,
                 "restarting the access point with the new Wi-Fi settings"
             );
+            continue;
+        }
+        if usb_projection.load(Ordering::Acquire) {
             continue;
         }
         sleep_unless_stopped(stop, ACCESS_POINT_RETRY);
@@ -796,6 +871,7 @@ fn run_access_point(
 
     let mut next_check = Instant::now() + ACCESS_POINT_CHECK_INTERVAL;
     while !stop.load(Ordering::Relaxed)
+        && !projection.usb_projection.load(Ordering::Acquire)
         && current_radio(radio, wireless) == (wireless.channel, wireless.channel_width_mhz)
     {
         match listener.accept() {
@@ -1049,6 +1125,11 @@ struct BluetoothDispatch {
     passkeys: PairingPasskeys,
     hands_free: HandsFree,
     state_dir: PathBuf,
+    platform_state_dir: PathBuf,
+    page_now: Arc<AtomicBool>,
+    hand_back: Arc<AtomicBool>,
+    usb_ended: Arc<AtomicBool>,
+    usb_projection: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
 }
 
@@ -1084,6 +1165,8 @@ impl BluetoothDispatch {
                 *control = Some(service.control());
             }
             let mut next_page = Instant::now() + RECONNECT_DELAY;
+            let mut last_page: Option<Instant> = None;
+            self.hand_back.store(true, Ordering::Release);
             while !self.stop.load(Ordering::Relaxed)
                 && service.is_running()
                 && self.mode() == Some(mode)
@@ -1096,9 +1179,16 @@ impl BluetoothDispatch {
                 if self.android_auto.take_ended_by_phone() {
                     self.dismiss_android_auto_peer();
                 }
-                if Instant::now() >= next_page {
-                    next_page = Instant::now() + RECONNECT_INTERVAL;
-                    self.page_last_phone(&service, mode);
+                let now = Instant::now();
+                if self.page_now.swap(false, Ordering::AcqRel) {
+                    next_page = next_page
+                        .min(last_page.map_or(now, |last| (last + MINIMUM_PAGE_GAP).max(now)));
+                }
+                if now >= next_page {
+                    next_page = now + RECONNECT_INTERVAL;
+                    last_page = Some(now);
+                    let hand_back = self.hand_back.swap(false, Ordering::AcqRel);
+                    self.page_last_phone(&service, mode, hand_back);
                 }
             }
             if let Ok(mut control) = self.bluetooth_control.write() {
@@ -1183,11 +1273,18 @@ impl BluetoothDispatch {
         self.directory.dismiss(&peer);
     }
 
-    fn page_last_phone(&self, service: &BluetoothService, mode: BluetoothMode) {
+    fn page_last_phone(&self, service: &BluetoothService, mode: BluetoothMode, hand_back: bool) {
+        if self.usb_projection.load(Ordering::Acquire) {
+            if hand_back {
+                self.hand_back.store(true, Ordering::Release);
+            }
+            return;
+        }
         if !self.carplay.snapshot().is_empty() || !self.android_auto.snapshot().is_empty() {
             return;
         }
-        let Some(phone) = known_phones::load(&self.state_dir).into_iter().next() else {
+        let last_platform = load_last_display_platform(&self.platform_state_dir);
+        let Some(phone) = page_target(known_phones::load(&self.state_dir), last_platform) else {
             return;
         };
         if is_dismissed(&self.dismissed, &phone.address) {
@@ -1200,14 +1297,31 @@ impl BluetoothDispatch {
                     && (mode == BluetoothMode::Projection || self.hands_free.projecting_over_usb())
             }
         };
-        if enabled {
-            tracing::debug!(
+        if !enabled {
+            return;
+        }
+        if hand_back {
+            if let Ok(mut focus) = self.focus.lock()
+                && focus.is_none()
+            {
+                *focus = Some((phone.address.clone(), Instant::now() + HAND_BACK_FOCUS));
+            }
+            if phone.kind == PhoneKind::AndroidAuto && self.usb_ended.swap(false, Ordering::AcqRel)
+            {
+                service.control().disconnect(&phone.address);
+            }
+            tracing::info!(
                 peer = phone.address,
                 kind = phone.kind.as_str(),
-                "paging the last phone"
+                "calling back the phone that was used last"
             );
-            service.control().connect(&phone.address, phone.kind);
         }
+        tracing::debug!(
+            peer = phone.address,
+            kind = phone.kind.as_str(),
+            "paging the last phone"
+        );
+        service.control().connect(&phone.address, phone.kind);
     }
 
     fn accept(&self, connection: RfcommConnection, mode: BluetoothMode) {
@@ -1239,6 +1353,13 @@ impl BluetoothDispatch {
             return;
         }
         if connection.profile == RfcommProfile::Iap2 {
+            if self.usb_projection.load(Ordering::Acquire) {
+                tracing::info!(
+                    peer,
+                    "ignoring wireless CarPlay while a phone projects over USB"
+                );
+                return;
+            }
             if self.carplay.offer(connection, peer.clone()) {
                 tracing::info!(peer, "wireless CarPlay phone connected over Bluetooth");
             } else {
@@ -1258,6 +1379,7 @@ impl BluetoothDispatch {
             bluetooth_control: Arc::clone(&self.bluetooth_control),
             android_auto_peer: Arc::clone(&self.android_auto_peer),
             hands_free: self.hands_free.clone(),
+            usb_projection: Arc::clone(&self.usb_projection),
             calls_need_usb: mode == BluetoothMode::HandsFreeOnly,
             state_dir: self.state_dir.clone(),
         };
@@ -1280,6 +1402,7 @@ struct RfcommLinks {
     bluetooth_control: SharedBluetoothControl,
     android_auto_peer: SharedPeer,
     hands_free: HandsFree,
+    usb_projection: Arc<AtomicBool>,
     calls_need_usb: bool,
     state_dir: PathBuf,
 }
@@ -1337,7 +1460,7 @@ fn bootstrap_android_auto(
     if !wireless.android_auto {
         return Ok(());
     }
-    if links.hands_free.projecting_over_usb() {
+    if links.hands_free.projecting_over_usb() || links.usb_projection.load(Ordering::Acquire) {
         tracing::info!(
             peer,
             "declining wireless Android Auto while a phone projects over USB"
@@ -1474,6 +1597,39 @@ mod tests {
         let listed = phones.snapshot();
         assert_eq!(listed.len(), 1);
         assert_ne!(listed[0].id, first_id);
+    }
+
+    #[test]
+    fn the_phone_of_the_platform_used_last_is_called_back_first() {
+        let phone = |kind, address: &str| KnownPhone {
+            kind,
+            address: address.to_owned(),
+            name: address.to_owned(),
+        };
+        let phones = vec![
+            phone(PhoneKind::AndroidAuto, "pixel"),
+            phone(PhoneKind::CarPlay, "iphone"),
+        ];
+        let target = |platform| page_target(phones.clone(), platform).map(|phone| phone.address);
+        assert_eq!(
+            target(Some(DisplayPlatform::CarPlay)).as_deref(),
+            Some("iphone")
+        );
+        assert_eq!(
+            target(Some(DisplayPlatform::AndroidAuto)).as_deref(),
+            Some("pixel")
+        );
+        assert_eq!(target(None).as_deref(), Some("pixel"));
+        assert_eq!(
+            page_target(
+                vec![phone(PhoneKind::AndroidAuto, "pixel")],
+                Some(DisplayPlatform::CarPlay)
+            )
+            .map(|phone| phone.address)
+            .as_deref(),
+            Some("pixel")
+        );
+        assert!(page_target(Vec::new(), Some(DisplayPlatform::CarPlay)).is_none());
     }
 
     #[test]

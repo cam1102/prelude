@@ -20,7 +20,7 @@ use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 
 use crate::{
-    KnownPhone, RuntimeSettings, WirelessPhoneDirectory,
+    CarPlayDock, KnownPhone, RuntimeSettings, WirelessPhoneDirectory,
     fonts::{self, FontSet},
 };
 
@@ -238,6 +238,7 @@ enum Item {
     AutoBrightness,
     AutoNightMode,
     Density,
+    CarPlayDock,
     PhoneAudio,
     Equalizer,
     Version,
@@ -255,7 +256,11 @@ impl Item {
     const fn adjustable(self) -> bool {
         matches!(
             self,
-            Self::DensitySlider | Self::WifiBand | Self::WifiChannel | Self::WifiWidth
+            Self::DensitySlider
+                | Self::CarPlayDock
+                | Self::WifiBand
+                | Self::WifiChannel
+                | Self::WifiWidth
         )
     }
 
@@ -428,6 +433,7 @@ struct SettingsUi<D> {
     staged_dpi: u32,
     staged_dpi_customized: bool,
     staged_phone_audio: bool,
+    staged_dock: CarPlayDock,
     staged_radio: Option<(u8, ChannelWidth)>,
     page: Page,
     focus: usize,
@@ -478,6 +484,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
             staged_dpi: settings.reported_dpi,
             staged_dpi_customized: settings.dpi_customized,
             staged_phone_audio: settings.phone_audio,
+            staged_dock: settings.carplay_dock,
             staged_radio: settings.wifi_radio(),
             page: Page::Settings,
             focus: 0,
@@ -597,6 +604,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
         self.staged_dpi != self.settings.reported_dpi
             || self.staged_dpi_customized != self.settings.dpi_customized
             || self.staged_phone_audio != self.settings.phone_audio
+            || self.staged_dock != self.settings.carplay_dock
             || self.staged_radio != self.settings.wifi_radio()
     }
 
@@ -606,7 +614,12 @@ impl<D: OverlaySurface> SettingsUi<D> {
                 Section::plain(vec![Item::Phones]),
                 Section::titled(
                     "Display",
-                    vec![Item::AutoBrightness, Item::AutoNightMode, Item::Density],
+                    vec![
+                        Item::AutoBrightness,
+                        Item::AutoNightMode,
+                        Item::Density,
+                        Item::CarPlayDock,
+                    ],
                 ),
                 Section::titled("Audio", vec![Item::PhoneAudio, Item::Equalizer]),
                 Section::titled("Advanced", vec![Item::Wifi, Item::Version]),
@@ -682,6 +695,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
         self.staged_dpi = self.settings.reported_dpi;
         self.staged_dpi_customized = self.settings.dpi_customized;
         self.staged_phone_audio = self.settings.phone_audio;
+        self.staged_dock = self.settings.carplay_dock;
         self.staged_radio = self.settings.wifi_radio();
         self.editing = false;
         self.touch = None;
@@ -702,6 +716,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
         next.reported_dpi = self.staged_dpi;
         next.dpi_customized = self.staged_dpi_customized;
         next.phone_audio = self.staged_phone_audio;
+        next.carplay_dock = self.staged_dock;
         if let Some((channel, width)) = self.staged_radio {
             next.wifi_channel = Some(channel);
             next.wifi_channel_width_mhz = Some(width.mhz());
@@ -714,7 +729,8 @@ impl<D: OverlaySurface> SettingsUi<D> {
         }
         let restart_required = next.reported_dpi != self.settings.reported_dpi
             || next.dpi_customized != self.settings.dpi_customized
-            || next.phone_audio != self.settings.phone_audio;
+            || next.phone_audio != self.settings.phone_audio
+            || next.carplay_dock != self.settings.carplay_dock;
         let radio_changed = next.wifi_radio() != self.settings.wifi_radio();
         self.settings = next;
         self.menu_open = false;
@@ -891,9 +907,11 @@ impl<D: OverlaySurface> SettingsUi<D> {
             Item::Connect => self.connect_opened_phone(),
             Item::Forget => self.forget_opened_phone(),
             Item::DensityReset => self.restore_original_dpi(),
-            Item::DensitySlider | Item::WifiBand | Item::WifiChannel | Item::WifiWidth => {
-                self.adjust(item, 1, true);
-            }
+            Item::DensitySlider
+            | Item::CarPlayDock
+            | Item::WifiBand
+            | Item::WifiChannel
+            | Item::WifiWidth => self.adjust(item, 1, true),
         }
     }
 
@@ -903,6 +921,11 @@ impl<D: OverlaySurface> SettingsUi<D> {
                 let dpi = i64::from(self.staged_dpi) + delta as i64 * i64::from(DPI_STEP);
                 let dpi = dpi.clamp(i64::from(MIN_DPI), i64::from(MAX_DPI));
                 self.stage_dpi(u32::try_from(dpi).unwrap_or(MIN_DPI));
+            }
+            Item::CarPlayDock => {
+                self.staged_dock = step_option(&CarPlayDock::ALL, self.staged_dock, delta, wrap);
+                self.error_message = None;
+                self.redraw();
             }
             Item::WifiBand | Item::WifiChannel | Item::WifiWidth => {
                 if let Some(radio) = self.staged_radio {
@@ -1506,6 +1529,15 @@ impl<D: OverlaySurface> SettingsUi<D> {
                 "Screen density",
                 Trailing::Link(format!("{} dpi", self.staged_dpi), SECONDARY),
             ),
+            Item::CarPlayDock => {
+                let value = self.staged_dock.label();
+                let trailing = if self.editing && self.focused_item() == Some(item) {
+                    Trailing::Value(format!("‹  {value}  ›"), GREEN)
+                } else {
+                    Trailing::Value(value.to_owned(), SECONDARY)
+                };
+                RowView::new("CarPlay dock", trailing)
+            }
             Item::PhoneAudio => {
                 RowView::new("Phone audio", Trailing::Switch(self.staged_phone_audio))
                     .detail("Keep sound on your phone")
@@ -2224,6 +2256,43 @@ mod tests {
             })]
         ));
         assert!(harness.ui.settings.phone_audio);
+    }
+
+    #[test]
+    fn carplay_dock_is_picked_in_place_and_restarts_projection_on_close() {
+        let mut harness = Harness::new();
+        harness.focus(Item::CarPlayDock);
+        harness.press(KnobInputButton::Select);
+        assert!(harness.ui.editing);
+        harness.turn(2);
+        assert_eq!(harness.ui.staged_dock, CarPlayDock::Bottom);
+        harness.turn(1);
+        assert_eq!(harness.ui.staged_dock, CarPlayDock::Bottom);
+        harness.turn(-1);
+        assert_eq!(harness.ui.staged_dock, CarPlayDock::Right);
+        assert!(harness.ui.has_staged_changes());
+        harness.press(KnobInputButton::Back);
+        assert!(harness.ui.menu_open);
+        harness.tap(400, harness.screen_y(Item::CarPlayDock));
+        assert_eq!(harness.ui.staged_dock, CarPlayDock::Bottom);
+        harness.tap(400, harness.screen_y(Item::CarPlayDock));
+        assert_eq!(harness.ui.staged_dock, CarPlayDock::Left);
+        harness.tap(400, harness.screen_y(Item::CarPlayDock));
+        assert_eq!(harness.ui.staged_dock, CarPlayDock::Right);
+        harness.press(KnobInputButton::Back);
+        assert!(!harness.ui.menu_open);
+        assert!(matches!(
+            harness.events.try_iter().collect::<Vec<_>>().as_slice(),
+            [HostUiEvent::SettingsCommitted(SettingsCommitted {
+                restart_required: true,
+                radio_changed: false,
+                settings: RuntimeSettings {
+                    carplay_dock: CarPlayDock::Right,
+                    ..
+                },
+            })]
+        ));
+        assert_eq!(harness.ui.settings.carplay_dock, CarPlayDock::Right);
     }
 
     #[test]

@@ -9,7 +9,7 @@ use prelude_wireless::access_point::{ChannelWidth, is_supported_channel};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::DaemonConfig;
+use crate::{CarPlayDock, DaemonConfig};
 
 const SETTINGS_FILE: &str = "settings.toml";
 const MAXIMUM_SETTINGS_BYTES: u64 = 2048;
@@ -44,6 +44,7 @@ pub struct RuntimeSettings {
     pub original_dpi: u32,
     pub dpi_customized: bool,
     pub phone_audio: bool,
+    pub carplay_dock: CarPlayDock,
     pub equalizer: prelude_media::EqualizerSettings,
     pub wifi_channel: Option<u8>,
     pub wifi_channel_width_mhz: Option<u16>,
@@ -58,6 +59,7 @@ impl Default for RuntimeSettings {
             original_dpi: prelude_android_auto_protocol::DEFAULT_VIDEO_DENSITY_DPI,
             dpi_customized: false,
             phone_audio: false,
+            carplay_dock: CarPlayDock::Left,
             equalizer: Default::default(),
             wifi_channel: None,
             wifi_channel_width_mhz: None,
@@ -79,6 +81,7 @@ impl RuntimeSettings {
             dpi_customized: false,
             phone_audio: config.airplay.disable_audio_output
                 && config.android_auto.disable_audio_output,
+            carplay_dock: config.airplay.dock,
             equalizer: config.media.equalizer.settings(),
             wifi_channel: Some(config.wireless.channel),
             wifi_channel_width_mhz: Some(config.wireless.channel_width_mhz),
@@ -143,6 +146,7 @@ impl RuntimeSettings {
         config.android_auto.ui_density_dpi = settings.reported_dpi;
         config.airplay.disable_audio_output = settings.phone_audio;
         config.android_auto.disable_audio_output = settings.phone_audio;
+        config.airplay.dock = settings.carplay_dock;
         if let Some(channel) = settings.wifi_channel {
             config.wireless.channel = channel;
         }
@@ -238,6 +242,7 @@ mod tests {
             original_dpi: 170,
             dpi_customized: true,
             phone_audio: true,
+            carplay_dock: CarPlayDock::Bottom,
             equalizer: prelude_media::EqualizerSettings {
                 enabled: true,
                 bands_half_db: [24; 10],
@@ -413,6 +418,25 @@ mod tests {
             .expect("apply settings");
         assert!(!config.airplay.disable_audio_output);
         assert!(!config.android_auto.disable_audio_output);
+    }
+
+    #[test]
+    fn carplay_dock_is_applied_and_defaults_to_left_for_legacy_settings() {
+        let legacy: RuntimeSettings = toml::from_str("reported_dpi = 200\n").expect("legacy");
+        assert_eq!(legacy.carplay_dock, CarPlayDock::Left);
+        let decoded: RuntimeSettings =
+            toml::from_str("carplay_dock = \"right\"\n").expect("decode");
+        assert_eq!(decoded.carplay_dock, CarPlayDock::Right);
+        let mut config = DaemonConfig::default();
+        for dock in CarPlayDock::ALL {
+            RuntimeSettings {
+                carplay_dock: dock,
+                ..RuntimeSettings::default()
+            }
+            .apply_to_config(&mut config)
+            .expect("apply settings");
+            assert_eq!(config.airplay.dock, dock);
+        }
     }
 
     #[test]

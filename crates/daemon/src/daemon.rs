@@ -37,6 +37,16 @@ pub trait ProjectionRuntime: std::fmt::Debug + Send {
     }
     fn start(&mut self, device: &ProjectionDevice) -> Result<()>;
     fn stop(&mut self) -> Result<()>;
+    fn yields_to(&self, _device: &ProjectionDevice) -> bool {
+        false
+    }
+    fn holds_usb_session(&mut self) -> bool {
+        false
+    }
+    fn begin_handoff(&mut self) {}
+    fn stop_for_handoff(&mut self) -> Result<()> {
+        self.stop()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -81,6 +91,7 @@ pub struct Daemon<D, P> {
     discovery: D,
     projection: P,
     devices: Vec<ProjectionDevice>,
+    usb_session: bool,
     health: HealthRegistry,
     diagnostics: Diagnostics,
     heartbeat: HeartbeatWriter,
@@ -100,6 +111,7 @@ impl<D: ProjectionDeviceDiscovery, P: ProjectionRuntime> Daemon<D, P> {
             discovery,
             projection,
             devices: Vec::new(),
+            usb_session: false,
             health: HealthRegistry::default(),
             diagnostics: Diagnostics::new(256),
             heartbeat,
@@ -110,7 +122,11 @@ impl<D: ProjectionDeviceDiscovery, P: ProjectionRuntime> Daemon<D, P> {
     pub fn poll(&mut self) -> Result<DiagnosticSnapshot> {
         let projection_required = self.config.projection.mode != ProjectionMode::Disabled;
         match self.discovery.scan() {
-            Ok(devices) => {
+            Ok(mut devices) => {
+                self.usb_session = self.projection.holds_usb_session();
+                if self.usb_session {
+                    devices.retain(|device| !device.is_wireless());
+                }
                 self.devices = devices;
                 self.projection.set_phone_presence(!self.devices.is_empty());
                 self.health.set(
@@ -311,6 +327,16 @@ impl<D: ProjectionDeviceDiscovery, P: ProjectionRuntime> Daemon<D, P> {
             })
     }
 
+    pub fn choose_wireless(&mut self) -> Result<()> {
+        self.discovery.choose_wireless();
+        if self.devices.iter().any(|device| !device.is_wireless()) {
+            self.devices.clear();
+            self.usb_session = false;
+            self.stop()?;
+        }
+        Ok(())
+    }
+
     pub fn maintain_projection(&mut self) -> Result<bool> {
         if !matches!(
             self.config.projection.mode,
@@ -318,11 +344,21 @@ impl<D: ProjectionDeviceDiscovery, P: ProjectionRuntime> Daemon<D, P> {
         ) {
             return Ok(false);
         }
-        if matches!(
+        let transport_alive = matches!(
             self.projection.probe().transport_state,
             HealthState::Starting | HealthState::Ready
-        ) {
-            return Ok(false);
+        );
+        if transport_alive {
+            let [device] = self.devices.as_slice() else {
+                return Ok(false);
+            };
+            if !self.projection.yields_to(device) {
+                return Ok(false);
+            }
+            tracing::info!(
+                protocol = device.protocol_name(),
+                "a wired phone was plugged in; replacing the wireless session"
+            );
         }
         self.start()?;
         Ok(true)
@@ -364,6 +400,14 @@ impl<D: ProjectionDeviceDiscovery, P: ProjectionRuntime> Daemon<D, P> {
 
     pub fn has_discovered_phone(&self) -> bool {
         !self.devices.is_empty()
+    }
+
+    pub const fn projecting_over_usb(&self) -> bool {
+        self.usb_session
+    }
+
+    pub fn has_wireless_phone(&self) -> bool {
+        self.devices.iter().any(ProjectionDevice::is_wireless)
     }
 
     fn update_media_health(
@@ -695,6 +739,121 @@ mod tests {
         daemon.poll().expect("poll");
         assert!(daemon.maintain_projection().expect("first connect"));
         assert!(!daemon.maintain_projection().expect("already connected"));
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn choosing_a_wireless_phone_stops_the_usb_session_without_restarting_it() {
+        let (_state_directory, mut config) = test_config();
+        config.usb.configuration = Some(6);
+        config.usb.configuration_is_private = true;
+        config.usb.allow_configuration_changes = true;
+        config.usb.allow_private_apple_configuration = true;
+        config.usb.allow_private_lockdown_service = true;
+        config.projection.mode = ProjectionMode::ExperimentalPrivateProtocol;
+        config.projection.allow_experimental_private_protocol = true;
+        let starts = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(AtomicUsize::new(0));
+        let runtime = ReconnectRuntime {
+            ready: Arc::new(AtomicBool::new(false)),
+            starts: Arc::clone(&starts),
+            stops: Arc::clone(&stops),
+        };
+        let mut daemon =
+            Daemon::new(config, FixedDiscovery(vec![candidate()]), runtime).expect("daemon");
+        daemon.poll().expect("poll");
+        assert!(daemon.maintain_projection().expect("connect"));
+        daemon.choose_wireless().expect("choose wireless");
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+        assert!(daemon.maintain_projection().is_err());
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+    }
+
+    #[derive(Debug)]
+    struct UsbSessionRuntime;
+
+    impl ProjectionRuntime for UsbSessionRuntime {
+        fn probe(&mut self) -> RuntimeProbe {
+            UnsupportedProjectionRuntime.probe()
+        }
+
+        fn start(&mut self, _device: &ProjectionDevice) -> Result<()> {
+            Ok(())
+        }
+
+        fn stop(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn holds_usb_session(&mut self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn wireless_phones_stay_hidden_while_a_usb_session_runs() {
+        let (_state_directory, config) = test_config();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let stream =
+            std::net::TcpStream::connect(listener.local_addr().expect("address")).expect("stream");
+        let phones = crate::WirelessPhones::default();
+        assert!(phones.offer(stream, "phone".to_owned()));
+        let wireless = phones
+            .snapshot()
+            .into_iter()
+            .map(ProjectionDevice::WirelessAndroidAuto)
+            .collect::<Vec<_>>();
+        let mut daemon =
+            Daemon::new(config, FixedDiscovery(wireless), UsbSessionRuntime).expect("daemon");
+        daemon.poll().expect("poll");
+        assert!(daemon.projecting_over_usb());
+        assert!(!daemon.has_wireless_phone());
+    }
+
+    #[derive(Debug)]
+    struct WirelessSessionRuntime {
+        starts: Arc<AtomicUsize>,
+    }
+
+    impl ProjectionRuntime for WirelessSessionRuntime {
+        fn probe(&mut self) -> RuntimeProbe {
+            let mut probe = UnsupportedProjectionRuntime.probe();
+            probe.transport_state = HealthState::Ready;
+            probe
+        }
+
+        fn start(&mut self, _device: &ProjectionDevice) -> Result<()> {
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn stop(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn yields_to(&self, device: &ProjectionDevice) -> bool {
+            !device.is_wireless()
+        }
+    }
+
+    #[test]
+    fn a_wired_phone_replaces_a_live_session_that_yields_to_it() {
+        let (_state_directory, mut config) = test_config();
+        config.usb.configuration = Some(6);
+        config.usb.configuration_is_private = true;
+        config.usb.allow_configuration_changes = true;
+        config.usb.allow_private_apple_configuration = true;
+        config.usb.allow_private_lockdown_service = true;
+        config.projection.mode = ProjectionMode::ExperimentalPrivateProtocol;
+        config.projection.allow_experimental_private_protocol = true;
+        let starts = Arc::new(AtomicUsize::new(0));
+        let runtime = WirelessSessionRuntime {
+            starts: Arc::clone(&starts),
+        };
+        let mut daemon =
+            Daemon::new(config, FixedDiscovery(vec![candidate()]), runtime).expect("daemon");
+        daemon.poll().expect("poll");
+        assert!(daemon.maintain_projection().expect("switch to wired"));
         assert_eq!(starts.load(Ordering::SeqCst), 1);
     }
 

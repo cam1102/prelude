@@ -47,6 +47,7 @@ pub enum ConnectionStep {
     SettingUpSession,
     SettingUpStreams,
     StartingStream,
+    SwitchingToUsb,
 }
 
 impl ConnectionStep {
@@ -72,6 +73,7 @@ impl ConnectionStep {
             Self::SettingUpSession => "Setting up session",
             Self::SettingUpStreams => "Setting up audio and video",
             Self::StartingStream => "Starting stream",
+            Self::SwitchingToUsb => "Switching to USB",
         }
     }
 }

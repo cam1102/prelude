@@ -171,6 +171,7 @@ const fn saturating_increment(value: &mut u64) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoBackendEvent {
     RequestKeyFrame,
+    FirstFrameRendered,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -538,6 +539,7 @@ fn video_worker(context: VideoWorkerContext) -> Result<VideoBackpressureStats> {
         return ingress.stats();
     }
     let mut stall_watchdog = DecodeStallWatchdog::default();
+    let mut first_frame_rendered = false;
     loop {
         if cancel.load(Ordering::Acquire) {
             break;
@@ -625,6 +627,10 @@ fn video_worker(context: VideoWorkerContext) -> Result<VideoBackpressureStats> {
                         .saturating_sub(schedule.deadline_ns);
                     synchronization_telemetry.record_presentation(schedule, actual_lateness_ns);
                     stall_watchdog.record_render();
+                    if !first_frame_rendered {
+                        first_frame_rendered = true;
+                        let _ = events.try_send(VideoBackendEvent::FirstFrameRendered);
+                    }
                 }
             }
         }
