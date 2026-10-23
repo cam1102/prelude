@@ -27,9 +27,13 @@ const DEFAULT_NIGHT_MODE_ON_DELAY_MS: u64 = 8_000;
 const DEFAULT_NIGHT_MODE_OFF_DELAY_MS: u64 = 3_000;
 const DEFAULT_INTEGRATION_TIME_MS: u32 = 100;
 const DEFAULT_GAIN: u32 = 16;
-const EASE_PERCENT: f64 = 0.15;
+const BACKLIGHT_TICK: Duration = Duration::from_millis(40);
+const BACKLIGHT_STEP_FRACTION: f64 = 0.02;
 const MIN_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const MAX_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const INITIAL_SAMPLES: usize = 5;
+const INITIAL_SAMPLE_MARGIN: Duration = Duration::from_millis(10);
+const INITIAL_DISCOVERY_POLL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -75,6 +79,74 @@ impl Default for AmbientLightConfig {
 pub enum AmbientLightError {
     #[error("starting the ambient-light monitor thread failed: {0}")]
     Thread(#[source] std::io::Error),
+    #[error("no ambient-light sensor appeared")]
+    SensorUnavailable,
+    #[error("no display backlight appeared")]
+    BacklightUnavailable,
+    #[error("ambient-light sensor reads failed")]
+    SensorRead,
+    #[error("writing the display backlight failed: {0}")]
+    BacklightWrite(#[source] std::io::Error),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InitialBacklight {
+    pub raw: u32,
+    pub brightness: u32,
+    pub max_brightness: u32,
+}
+
+pub fn apply_initial_backlight(
+    config: &AmbientLightConfig,
+    timeout: Duration,
+) -> Result<InitialBacklight, AmbientLightError> {
+    let deadline = Instant::now() + timeout;
+    let mut sensor = None;
+    let mut backlight = None;
+    while sensor.is_none() || backlight.is_none() {
+        if sensor.is_none() {
+            sensor = discover_ambient_light_device();
+        }
+        if backlight.is_none() {
+            backlight = discover_backlight_device();
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        if sensor.is_none() || backlight.is_none() {
+            thread::sleep(INITIAL_DISCOVERY_POLL);
+        }
+    }
+    let sensor = sensor.ok_or(AmbientLightError::SensorUnavailable)?;
+    let backlight = backlight.ok_or(AmbientLightError::BacklightUnavailable)?;
+
+    configure_ambient_light_device(&sensor, config);
+    let interval =
+        Duration::from_millis(u64::from(config.integration_time_ms)) + INITIAL_SAMPLE_MARGIN;
+    let mut samples = Vec::with_capacity(INITIAL_SAMPLES);
+    for _ in 0..INITIAL_SAMPLES {
+        thread::sleep(interval);
+        if let Some(raw) = read_u32(&sensor.raw_path) {
+            samples.push(raw);
+        }
+    }
+    samples.sort_unstable();
+    let raw = *samples
+        .get(samples.len() / 2)
+        .ok_or(AmbientLightError::SensorRead)?;
+    let brightness = ambient_to_backlight_target(
+        raw,
+        backlight.max_brightness,
+        config.minimum_brightness,
+        config.raw_at_max_brightness,
+        config.dim_knee,
+    );
+    write_backlight(&backlight, brightness).map_err(AmbientLightError::BacklightWrite)?;
+    Ok(InitialBacklight {
+        raw,
+        brightness,
+        max_brightness: backlight.max_brightness,
+    })
 }
 
 #[derive(Debug, Clone, Default)]
@@ -209,76 +281,80 @@ fn monitor_loop(
     let mut sensor = None;
     let mut backlight = None;
     let mut samples = VecDeque::with_capacity(config.median_window);
+    let mut ambient = None;
+    let mut next_sample = Instant::now();
     let mut current_brightness = None;
+    let mut ramp = BacklightRamp::default();
     let mut last_night_mode = state.night_mode();
     let mut pending_night_mode = None;
     let mut brightness_write_failed = false;
 
     while !stop.load(Ordering::Acquire) {
-        if sensor.is_none() {
-            sensor = discover_ambient_light_device();
-            if let Some(device) = &sensor {
-                configure_ambient_light_device(device, &config);
-                info!(path = %device.raw_path.display(), "using ambient-light sensor");
+        let now = Instant::now();
+        if now >= next_sample {
+            next_sample = now + poll_interval;
+            if sensor.is_none() {
+                sensor = discover_ambient_light_device();
+                if let Some(device) = &sensor {
+                    configure_ambient_light_device(device, &config);
+                    info!(path = %device.raw_path.display(), "using ambient-light sensor");
+                }
             }
-        }
+            if let Some(device) = sensor.as_ref() {
+                if let Some(raw) = read_u32(&device.raw_path) {
+                    samples.push_back(raw);
+                    if samples.len() > config.median_window {
+                        samples.pop_front();
+                    }
+                    if let Some(median) = median_of_samples(&samples, config.median_window) {
+                        ambient = Some(median);
+                    }
+                } else {
+                    debug!(path = %device.raw_path.display(), "ambient-light read failed; rediscovering sensor");
+                    sensor = None;
+                    samples.clear();
+                }
+            }
 
-        let Some(device) = sensor.as_ref() else {
-            thread::sleep(poll_interval);
-            continue;
-        };
-
-        let Some(raw) = read_u32(&device.raw_path) else {
-            debug!(path = %device.raw_path.display(), "ambient-light read failed; rediscovering sensor");
-            sensor = None;
-            samples.clear();
-            thread::sleep(poll_interval);
-            continue;
-        };
-
-        samples.push_back(raw);
-        if samples.len() > config.median_window {
-            samples.pop_front();
-        }
-        let Some(median) = median_of_samples(&samples, config.median_window) else {
-            thread::sleep(poll_interval);
-            continue;
-        };
-
-        let darkness = ambient_darkness_percent(median);
-        if control.automatic_night_mode() {
-            let now = Instant::now();
-            let transition = night_mode_transition(
-                last_night_mode,
-                &mut pending_night_mode,
-                darkness,
-                now,
-                &config,
-            );
-            if let Some(next_night_mode) = transition {
-                pending_night_mode = None;
-                last_night_mode = next_night_mode;
-                state.set_night_mode(next_night_mode);
-                info!(
-                    raw = median,
-                    darkness_percent = darkness,
-                    night_mode = next_night_mode,
-                    "ambient-light UI mode changed"
+            if let Some(median) = ambient
+                && control.automatic_night_mode()
+            {
+                let darkness = ambient_darkness_percent(median);
+                let transition = night_mode_transition(
+                    last_night_mode,
+                    &mut pending_night_mode,
+                    darkness,
+                    now,
+                    &config,
                 );
-            }
-        } else {
-            pending_night_mode = None;
-            if last_night_mode {
-                last_night_mode = false;
-                state.set_night_mode(false);
+                if let Some(next_night_mode) = transition {
+                    pending_night_mode = None;
+                    last_night_mode = next_night_mode;
+                    state.set_night_mode(next_night_mode);
+                    info!(
+                        raw = median,
+                        darkness_percent = darkness,
+                        night_mode = next_night_mode,
+                        "ambient-light UI mode changed"
+                    );
+                }
+            } else if !control.automatic_night_mode() {
+                pending_night_mode = None;
+                if last_night_mode {
+                    last_night_mode = false;
+                    state.set_night_mode(false);
+                }
             }
         }
 
-        if control.automatic_brightness() {
+        let mut ramping = false;
+        if !control.automatic_brightness() {
+            current_brightness = None;
+            ramp = BacklightRamp::default();
+        } else if let Some(median) = ambient {
             if backlight.is_none() {
                 backlight = discover_backlight_device();
                 if let Some(device) = &backlight {
-                    current_brightness = read_backlight(device).or(Some(device.max_brightness));
                     info!(
                         path = %device.brightness_path.display(),
                         max_brightness = device.max_brightness,
@@ -288,6 +364,7 @@ fn monitor_loop(
             }
 
             if let Some(device) = backlight.as_ref() {
+                let minimum = config.minimum_brightness.min(device.max_brightness);
                 let target = ambient_to_backlight_target(
                     median,
                     device.max_brightness,
@@ -299,17 +376,19 @@ fn monitor_loop(
                     .or_else(|| read_backlight(device))
                     .unwrap_or(device.max_brightness)
                     .min(device.max_brightness);
-                let next = ease_step(current, target);
+                let next = ramp.advance(current, target, minimum, device.max_brightness);
                 if next != current {
                     match write_backlight(device, next) {
                         Ok(()) => {
                             current_brightness = Some(next);
+                            ramping = next != target;
                             if brightness_write_failed {
                                 info!("display backlight writes recovered");
                                 brightness_write_failed = false;
                             }
                         }
                         Err(error) => {
+                            current_brightness = None;
                             if !brightness_write_failed {
                                 warn!(
                                     error = %error,
@@ -324,7 +403,12 @@ fn monitor_loop(
             }
         }
 
-        thread::sleep(poll_interval);
+        let until_sample = next_sample.saturating_duration_since(Instant::now());
+        thread::sleep(if ramping {
+            until_sample.min(BACKLIGHT_TICK)
+        } else {
+            until_sample
+        });
     }
 }
 
@@ -505,24 +589,47 @@ fn ambient_to_backlight_target(
     if raw <= dim_knee || raw_at_max_brightness <= dim_knee {
         return minimum;
     }
-    let numerator = (f64::from(raw) + 1.0).ln();
-    let denominator = (f64::from(raw_at_max_brightness) + 1.0).ln();
-    let ratio = (numerator / denominator).clamp(0.0, 1.0);
+    let normalized = f64::from(raw - dim_knee) / f64::from(raw_at_max_brightness - dim_knee);
+    let ratio = normalized.clamp(0.0, 1.0).sqrt();
     minimum + ((f64::from(max_brightness - minimum) * ratio).round() as u32)
 }
 
-fn ease_step(current: u32, target: u32) -> u32 {
-    if current == target {
-        return current;
+#[derive(Debug, Default)]
+struct BacklightRamp {
+    target: Option<u32>,
+    step: i64,
+}
+
+impl BacklightRamp {
+    fn advance(&mut self, current: u32, target: u32, minimum: u32, maximum: u32) -> u32 {
+        let direction = (i64::from(target) - i64::from(current)).signum();
+        if self.target != Some(target) || self.step.signum() != direction {
+            self.step = ramp_step(current, target);
+        }
+        self.target = Some(target);
+        if current == target {
+            return current;
+        }
+        let next = i64::from(current) + self.step;
+        let next = if (self.step > 0 && next >= i64::from(target))
+            || (self.step < 0 && next <= i64::from(target))
+        {
+            i64::from(target)
+        } else {
+            next
+        };
+        next.clamp(i64::from(minimum), i64::from(maximum)) as u32
     }
-    let difference = target.abs_diff(current);
-    let step = (f64::from(difference) * EASE_PERCENT).round() as u32;
-    let step = step.max(1).min(difference);
-    if target > current {
-        current + step
-    } else {
-        current - step
+}
+
+fn ramp_step(current: u32, target: u32) -> i64 {
+    let difference = i64::from(target) - i64::from(current);
+    if difference == 0 {
+        return 0;
     }
+    let magnitude =
+        ((difference.unsigned_abs() as f64 * BACKLIGHT_STEP_FRACTION).round() as i64).max(1);
+    magnitude * difference.signum()
 }
 
 #[cfg(test)]
@@ -638,11 +745,33 @@ mod tests {
     }
 
     #[test]
-    fn easing_never_overshoots() {
-        assert_eq!(ease_step(16, 16), 16);
-        assert_eq!(ease_step(16, 17), 17);
-        assert!(ease_step(16, 160) < 160);
-        assert!(ease_step(160, 16) > 16);
-        assert_eq!(ease_step(159, 160), 160);
+    fn brightness_curve_matches_nocturne() {
+        assert_eq!(ambient_to_backlight_target(4, 160, 16, 1_500, 3), 20);
+        assert_eq!(ambient_to_backlight_target(31, 160, 16, 1_500, 3), 36);
+        assert_eq!(ambient_to_backlight_target(100, 160, 16, 1_500, 3), 53);
+        assert_eq!(ambient_to_backlight_target(500, 160, 16, 1_500, 3), 99);
+        assert_eq!(ambient_to_backlight_target(1_000, 160, 16, 1_500, 3), 134);
+        assert_eq!(ambient_to_backlight_target(0, 8, 16, 1_500, 3), 8);
+    }
+
+    #[test]
+    fn ramp_keeps_a_fixed_step_toward_a_steady_target() {
+        let mut ramp = BacklightRamp::default();
+        assert_eq!(ramp.advance(16, 160, 16, 160), 19);
+        assert_eq!(ramp.advance(19, 160, 16, 160), 22);
+        assert_eq!(ramp.advance(159, 160, 16, 160), 160);
+        assert_eq!(ramp.advance(160, 160, 16, 160), 160);
+        assert_eq!(ramp.advance(160, 16, 16, 160), 157);
+        assert_eq!(ramp.advance(157, 16, 16, 160), 154);
+        assert_eq!(BacklightRamp::default().advance(0, 160, 16, 160), 16);
+        assert_eq!(BacklightRamp::default().advance(5, 16, 16, 160), 16);
+    }
+
+    #[test]
+    fn ramp_restarts_its_step_when_the_target_moves() {
+        let mut ramp = BacklightRamp::default();
+        assert_eq!(ramp.advance(16, 160, 16, 160), 19);
+        assert_eq!(ramp.advance(19, 30, 16, 160), 20);
+        assert_eq!(ramp.advance(20, 30, 16, 160), 21);
     }
 }

@@ -7,6 +7,7 @@ require recipes-core/prelude-monorepo.inc
 
 SRC_URI += " \
     file://preluded.service \
+    file://prelude-backlight.service \
     file://prelude-usb-host.service \
     file://prelude-host-trial-next-boot.service \
     file://prelude-host-health.service \
@@ -53,6 +54,7 @@ DEPENDS = " \
 "
 
 SYSTEMD_SERVICE:${PN} = " \
+    prelude-backlight.service \
     prelude-usb-host.service \
     prelude-host-trial-next-boot.service \
     prelude-host-health.service \
@@ -76,6 +78,11 @@ do_install() {
 
     install -d ${D}${systemd_system_unitdir}
     install -m 0644 ${UNPACKDIR}/preluded.service ${D}${systemd_system_unitdir}/
+    install -m 0644 ${UNPACKDIR}/prelude-backlight.service ${D}${systemd_system_unitdir}/
+    # preluded owns the panel backlight. systemd-backlight would restore the
+    # level saved at the last clean shutdown (often the dark-cabin floor).
+    install -d ${D}${sysconfdir}/systemd/system
+    ln -sf /dev/null ${D}${sysconfdir}/systemd/system/systemd-backlight@backlight:backlight.service
     install -m 0644 ${UNPACKDIR}/prelude-usb-host.service ${D}${systemd_system_unitdir}/
     install -m 0644 ${UNPACKDIR}/prelude-host-trial-next-boot.service ${D}${systemd_system_unitdir}/
     install -m 0644 ${UNPACKDIR}/prelude-host-health.service ${D}${systemd_system_unitdir}/
@@ -164,6 +171,7 @@ SUMMARY:${PN}-dev-config = "Experimental projection configuration and provisioni
 # Cargo leaves symbols intact so Yocto can split debug data and strip binaries
 # according to the image policy. The tmpfiles fragment is runtime configuration.
 FILES:${PN}:append = " \
+    ${sysconfdir}/systemd/system/systemd-backlight@backlight:backlight.service \
     ${nonarch_libdir}/tmpfiles.d/prelude.conf \
     ${datadir}/prelude/*.nv12 \
     ${systemd_system_unitdir}/preluded.service.d/30-wireless.conf \

@@ -70,6 +70,9 @@ the menu overlays the session and captures local controls until it closes. The
 menu controls automatic brightness, automatic night mode, and the shared
 reported DPI, with a restore-original DPI action. DPI changes are committed
 when the menu closes and rebuild the projection runtime before it resumes.
+With automatic brightness on, `prelude-backlight.service` sets the backlight
+from the ambient-light sensor early in boot, before preluded starts.
+systemd-backlight is masked so it cannot restore a stale saved level.
 The Phones page lists up to four wireless phones, most recent first. Connect
 ends the current wireless session and pages the chosen phone, ignoring other
 phones for a minute; Forget (pressed twice to confirm) removes the phone and

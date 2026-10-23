@@ -15,13 +15,16 @@ use clap::{Parser, Subcommand, ValueEnum};
 use platform_superbird::{
     AudioRoutePreference, HeartbeatStamp, HeartbeatStampError, HostBootOutcome, Max20332Error,
     Max20332RegisterSnapshot, PlatformPaths, ProcessRoleCommand, UsbRole, UsbRoleManager,
-    UsbRoleTransaction, process_output_with_timeout,
+    UsbRoleTransaction, apply_initial_backlight, process_output_with_timeout,
 };
 #[cfg(target_os = "linux")]
 use platform_superbird::{GpioKey, LinuxGpioKeyReader, LinuxInputConfig};
 #[cfg(any(target_os = "linux", test))]
 use platform_superbird::{Max20332, RegisterBus};
-use preluded::{AUDIO_RUNTIME_STATUS_PATH, AudioRuntimeSnapshot, load_audio_runtime_status};
+use preluded::{
+    AUDIO_RUNTIME_STATUS_PATH, AudioRuntimeSnapshot, DaemonConfig, RuntimeSettings,
+    load_audio_runtime_status,
+};
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
 
@@ -33,6 +36,8 @@ const MAX20332_ADDRESS: u16 = 0x35;
 const HEARTBEAT_MAX_AGE: Duration = Duration::from_secs(15);
 const MAXIMUM_MAX20332_SNAPSHOT_BYTES: u64 = 128;
 const AUDIO_ROUTE_STATE: &str = "/var/lib/prelude/audio-route";
+const DAEMON_CONFIG: &str = "/etc/prelude/config.toml";
+const INITIAL_BACKLIGHT_TIMEOUT: Duration = Duration::from_secs(3);
 #[cfg(target_os = "linux")]
 const AUTOMATIC_HOST_BYPASS_KEY: GpioKey = GpioKey::Back;
 #[cfg(any(target_os = "linux", test))]
@@ -84,6 +89,11 @@ enum Command {
         count: u8,
     },
     DeviceMode,
+    #[command(hide = true)]
+    InitialBacklight {
+        #[arg(long, default_value = DAEMON_CONFIG)]
+        config: PathBuf,
+    },
     AudioRoute {
         #[command(subcommand)]
         command: AudioRouteCommand,
@@ -457,11 +467,29 @@ fn run(arguments: Arguments) -> Result<()> {
             println!("USB-device mode active; persistent host confirmation cleared");
             Ok(())
         }
+        Command::InitialBacklight { config } => initial_backlight(&config),
         Command::AudioRoute { command } => audio_route(command, Path::new(AUDIO_ROUTE_STATE)),
         Command::Diagnostics {
             command: DiagnosticsCommand::Export { output },
         } => export_diagnostics(&paths.state_dir.join("diagnostics"), &output),
     }
+}
+
+fn initial_backlight(config_path: &Path) -> Result<()> {
+    let config = DaemonConfig::load(config_path)?;
+    let defaults = RuntimeSettings::from_config(&config);
+    let settings = RuntimeSettings::load(&config.state_dir, defaults).unwrap_or(defaults);
+    let ambient = &config.platform.ambient_light;
+    if !ambient.enabled || !settings.auto_brightness {
+        println!("automatic brightness is off; leaving the backlight unchanged");
+        return Ok(());
+    }
+    let applied = apply_initial_backlight(ambient, INITIAL_BACKLIGHT_TIMEOUT)?;
+    println!(
+        "backlight set to {}/{} for ambient light {}",
+        applied.brightness, applied.max_brightness, applied.raw
+    );
+    Ok(())
 }
 
 fn audio_route(command: AudioRouteCommand, path: &Path) -> Result<()> {
@@ -1634,6 +1662,12 @@ mod tests {
         let automatic = Arguments::try_parse_from(["preludectl", "automatic-host-boot"])
             .expect("automatic OTG boot command");
         assert!(matches!(automatic.command, Command::AutomaticHostBoot));
+        let backlight = Arguments::try_parse_from(["preludectl", "initial-backlight"])
+            .expect("initial backlight command");
+        assert!(matches!(
+            backlight.command,
+            Command::InitialBacklight { config } if config == Path::new(DAEMON_CONFIG)
+        ));
         assert!(
             Arguments::try_parse_from(["preludectl", "host-trial-next-boot", "--timeout", "29",])
                 .is_err()

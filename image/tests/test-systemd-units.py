@@ -88,6 +88,17 @@ assert set(values(units[daemon_name], "Service", "ReadWritePaths")) >= {
     "/run/prelude /var/lib/prelude",
     "-/sys/bus/iio/devices -/sys/class/backlight",
 }
+backlight = units["prelude-backlight.service"]
+assert values(backlight, "Unit", "DefaultDependencies") == ["no"]
+assert values(backlight, "Service", "Type") == ["oneshot"]
+assert values(backlight, "Service", "ExecStart") == [
+    "/usr/bin/preludectl initial-backlight"
+]
+assert words(backlight, "Unit", "After") == {"local-fs.target"}
+assert words(backlight, "Unit", "Before") >= {"sysinit.target", daemon_name}
+assert words(backlight, "Unit", "Conflicts") == {"shutdown.target"}
+assert words(backlight, "Install", "WantedBy") == {"sysinit.target"}
+
 assert daemon_name in words(units[host_name], "Unit", "Before")
 assert host_name in words(units[health_name], "Unit", "Requires")
 assert "/var/lib/prelude/persistent-host-enabled" in values(
