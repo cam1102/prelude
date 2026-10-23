@@ -2487,10 +2487,12 @@ fn run_worker(
         }
         WorkerTransport::Wireless { stream, lease } => {
             set_stage(&progress, WorkerStage::OpeningProtocol);
-            let result = run_protocol(stream, &context).and_then(|(result, stream)| {
-                let _ = stream.shutdown(std::net::Shutdown::Both);
-                result
-            });
+            let bluetooth_address = car_bluetooth_address(&context);
+            let result =
+                run_protocol(stream, &context, bluetooth_address).and_then(|(result, stream)| {
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                    result
+                });
             if context.ended_by_phone.load(Ordering::Acquire) {
                 lease.ended_by_phone();
             }
@@ -2510,6 +2512,18 @@ fn run_worker(
 }
 
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
+fn car_bluetooth_address(context: &WorkerContext) -> Option<String> {
+    context
+        .hands_free
+        .as_ref()
+        .filter(|_| !context.config.disable_audio_output)
+        .and_then(|hands_free| {
+            hands_free
+                .wait_for_car_address(BLUETOOTH_READY_WAIT, || context.shutdown.is_requested())
+        })
+}
+
+#[cfg(all(target_os = "linux", feature = "linux-media"))]
 fn run_usb_worker(
     candidate: &AoapCandidate,
     context: &WorkerContext,
@@ -2522,6 +2536,10 @@ fn run_usb_worker(
         ..
     } = context;
     let _usb_session = context.hands_free.as_ref().map(HandsFree::usb_session);
+    let bluetooth_address = car_bluetooth_address(context);
+    if shutdown.is_requested() {
+        return Ok(());
+    }
     set_stage(progress, WorkerStage::OpeningAoap);
     let mut backend = RusbBackend;
     let identity = AccessoryIdentity {
@@ -2569,7 +2587,7 @@ fn run_usb_worker(
         Duration::from_millis(config.session_io_timeout_ms.min(250)),
         Duration::from_millis(config.usb_transfer_timeout_ms),
     );
-    let (result, io) = run_protocol(io, context)?;
+    let (result, io) = run_protocol(io, context, bluetooth_address)?;
     let mut transport = io.into_transport();
     if result.is_ok() {
         transport.set_reset_on_close(false);
@@ -2584,6 +2602,7 @@ fn run_usb_worker(
 fn run_protocol<T: std::io::Read + std::io::Write + Send>(
     io: T,
     context: &WorkerContext,
+    bluetooth_address: Option<String>,
 ) -> std::result::Result<(std::result::Result<(), String>, T), String> {
     let WorkerContext {
         config,
@@ -2599,12 +2618,6 @@ fn run_protocol<T: std::io::Read + std::io::Write + Send>(
         hands_free,
     } = context;
     let audio_output = !config.disable_audio_output;
-    let bluetooth_address = hands_free
-        .as_ref()
-        .filter(|_| audio_output)
-        .and_then(|hands_free| {
-            hands_free.wait_for_car_address(BLUETOOTH_READY_WAIT, || shutdown.is_requested())
-        });
     if let Some(address) = &bluetooth_address {
         tracing::info!(address, "offering Bluetooth hands-free calls to the phone");
     }
