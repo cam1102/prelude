@@ -74,6 +74,16 @@ const GREEN: [u8; 3] = [30, 215, 96];
 const RED: [u8; 3] = [255, 69, 58];
 const WHITE: [u8; 3] = [255, 255, 255];
 const SECONDARY: [u8; 3] = [152, 152, 158];
+const SUPPORT_QR_MODULES: i32 = 29;
+const SUPPORT_QR: [u32; SUPPORT_QR_MODULES as usize] = [
+    0x1fc0e47f, 0x10512141, 0x1758535d, 0x17566f5d, 0x174eef5d, 0x1042d941, 0x1fd5557f, 0x001b8200,
+    0x105468ce, 0x03194236, 0x1a550c40, 0x133973e8, 0x1c6cc161, 0x1ab4c273, 0x1b51f1bc, 0x1a08d0b5,
+    0x0ce6680c, 0x19a313f7, 0x1f53df49, 0x17367710, 0x114f0bf7, 0x00199118, 0x1fc3e75c, 0x10469713,
+    0x1741a3f8, 0x1740bdae, 0x174f687e, 0x1049b2fd, 0x1fd03a3c,
+];
+const SUPPORT_CARD_X: i32 = 64;
+const SUPPORT_CARD_SIZE: i32 = 280;
+const SUPPORT_TEXT_X: i32 = SUPPORT_CARD_X + SUPPORT_CARD_SIZE + 40;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SettingsCommitted {
@@ -233,6 +243,7 @@ enum Page {
     Presets,
     Wifi,
     Equalizer,
+    Support,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,6 +259,7 @@ enum Item {
     Presets,
     Preset(usize),
     PresetsReset,
+    Support,
     Version,
     Phone(usize),
     Connect,
@@ -637,7 +649,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
                 ),
                 Section::titled("Audio", vec![Item::PhoneAudio, Item::Equalizer]),
                 Section::titled("Controls", vec![Item::Presets]),
-                Section::titled("Advanced", vec![Item::Wifi, Item::Version]),
+                Section::titled("Advanced", vec![Item::Wifi, Item::Support, Item::Version]),
             ],
             Page::Phones => vec![Section::plain(
                 (0..self.phones.len()).map(Item::Phone).collect(),
@@ -663,7 +675,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
                 Section::plain(vec![Item::WifiBand, Item::WifiChannel, Item::WifiWidth])
                     .footer("Wi-Fi restarts after settings close"),
             ],
-            Page::Wifi | Page::Equalizer => Vec::new(),
+            Page::Wifi | Page::Equalizer | Page::Support => Vec::new(),
         }
     }
 
@@ -926,6 +938,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
             Item::Equalizer => self.enter(Page::Equalizer),
             Item::Presets => self.enter(Page::Presets),
             Item::PresetsReset => self.reset_presets(),
+            Item::Support => self.enter(Page::Support),
             Item::Version => {}
             Item::Phone(index) => self.open_phone(index),
             Item::Connect => self.connect_opened_phone(),
@@ -1216,6 +1229,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
                 self.equalizer_control.availability(),
                 self.error_message,
             ),
+            Page::Support => self.render_support(canvas),
             _ if layout.rows.is_empty() => self.render_empty(canvas),
             _ => self.render_layout(canvas, &layout),
         }
@@ -1244,6 +1258,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
             Page::Presets => "Preset buttons",
             Page::Wifi => "Wi-Fi",
             Page::Equalizer => "Equalizer",
+            Page::Support => "Support Prelude",
         }
     }
 
@@ -1352,6 +1367,75 @@ impl<D: OverlaySurface> SettingsUi<D> {
             SECONDARY,
             false,
         );
+    }
+
+    fn render_support(&self, canvas: &mut Canvas) {
+        let center_y = (HEADER_HEIGHT + DISPLAY_HEIGHT as i32) / 2 - 6;
+        let card_y = center_y - SUPPORT_CARD_SIZE / 2;
+        canvas.rounded_rect(
+            SUPPORT_CARD_X,
+            card_y,
+            SUPPORT_CARD_SIZE,
+            SUPPORT_CARD_SIZE,
+            GROUP_RADIUS,
+            WHITE,
+            255,
+        );
+        let scale = (SUPPORT_CARD_SIZE - 32) / SUPPORT_QR_MODULES;
+        let inset = (SUPPORT_CARD_SIZE - SUPPORT_QR_MODULES * scale) / 2;
+        for (row, bits) in (0..).zip(SUPPORT_QR) {
+            for column in 0..SUPPORT_QR_MODULES {
+                if bits >> (SUPPORT_QR_MODULES - 1 - column) & 1 == 1 {
+                    canvas.rounded_rect(
+                        SUPPORT_CARD_X + inset + column * scale,
+                        card_y + inset + row * scale,
+                        scale,
+                        scale,
+                        0,
+                        [0, 0, 0],
+                        255,
+                    );
+                }
+            }
+        }
+        let width = CONTENT_RIGHT - SUPPORT_TEXT_X;
+        let lines = [
+            ("Scan to donate", -70, LABEL_SIZE, WHITE, true),
+            (
+                "Donations are split between",
+                -22,
+                DETAIL_SIZE,
+                SECONDARY,
+                false,
+            ),
+            (
+                "the Nocturne team and fund",
+                6,
+                DETAIL_SIZE,
+                SECONDARY,
+                false,
+            ),
+            (
+                "future features. Thank you!",
+                34,
+                DETAIL_SIZE,
+                SECONDARY,
+                false,
+            ),
+            ("usenocturne.com/support", 82, DETAIL_SIZE, WHITE, true),
+        ];
+        for (text, offset, size, color, semibold) in lines {
+            let text = self.fonts.fit(text, size, semibold, width);
+            canvas.text(
+                self.fonts,
+                &text,
+                SUPPORT_TEXT_X,
+                center_y + offset,
+                size,
+                color,
+                semibold,
+            );
+        }
     }
 
     fn render_layout(&self, canvas: &mut Canvas, layout: &Layout) {
@@ -1618,6 +1702,9 @@ impl<D: OverlaySurface> SettingsUi<D> {
                     WHITE
                 },
             ),
+            Item::Support => {
+                RowView::new("Support Prelude", Trailing::Link(String::new(), SECONDARY))
+            }
             Item::Version => {
                 RowView::new("Version", Trailing::Value(self.version.clone(), SECONDARY))
             }
@@ -2570,7 +2657,9 @@ mod tests {
              Reset flat Preamp +12.0 dB All USB output EQ curve unavailable bypasses 31 63 125 \
              250 500 1k 2k 4k 8k 16k −24 USB audio only Turn choose Press adjust finish Release \
              Controls Preset buttons Default Custom Button 1 2 3 4 Previous track Play/Pause Next \
-             Mute Home Back Voice assistant Answer call End Reset to default"
+             Mute Home Back Voice assistant Answer call End Reset to default Support Prelude \
+             Scan to donate Donations are split between the team and fund future features. \
+             Thank you! usenocturne.com/support"
                 .chars()
         {
             assert!(
@@ -2605,6 +2694,12 @@ mod tests {
         harness.press(KnobInputButton::Select);
         harness.focus(Item::Version);
         capture(&harness, "settings-bottom");
+        harness.focus(Item::Support);
+        harness.press(KnobInputButton::Select);
+        assert_eq!(harness.ui.page, Page::Support);
+        capture(&harness, "support");
+        harness.press(KnobInputButton::Back);
+        assert_eq!(harness.ui.focused_item(), Some(Item::Support));
         harness.focus(Item::Presets);
         harness.press(KnobInputButton::Select);
         harness.focus(Item::Preset(1));
