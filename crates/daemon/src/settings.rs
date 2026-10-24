@@ -9,7 +9,7 @@ use prelude_wireless::access_point::{ChannelWidth, is_supported_channel};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{CarPlayDock, DaemonConfig};
+use crate::{CarPlayDock, DaemonConfig, PRESET_COUNT, PresetAction};
 
 const SETTINGS_FILE: &str = "settings.toml";
 const MAXIMUM_SETTINGS_BYTES: u64 = 2048;
@@ -45,6 +45,7 @@ pub struct RuntimeSettings {
     pub dpi_customized: bool,
     pub phone_audio: bool,
     pub carplay_dock: CarPlayDock,
+    pub presets: [PresetAction; PRESET_COUNT],
     pub equalizer: prelude_media::EqualizerSettings,
     pub wifi_channel: Option<u8>,
     pub wifi_channel_width_mhz: Option<u16>,
@@ -60,6 +61,7 @@ impl Default for RuntimeSettings {
             dpi_customized: false,
             phone_audio: false,
             carplay_dock: CarPlayDock::Left,
+            presets: PresetAction::DEFAULTS,
             equalizer: Default::default(),
             wifi_channel: None,
             wifi_channel_width_mhz: None,
@@ -82,6 +84,7 @@ impl RuntimeSettings {
             phone_audio: config.airplay.disable_audio_output
                 && config.android_auto.disable_audio_output,
             carplay_dock: config.airplay.dock,
+            presets: config.platform.presets.actions(),
             equalizer: config.media.equalizer.settings(),
             wifi_channel: Some(config.wireless.channel),
             wifi_channel_width_mhz: Some(config.wireless.channel_width_mhz),
@@ -147,6 +150,7 @@ impl RuntimeSettings {
         config.airplay.disable_audio_output = settings.phone_audio;
         config.android_auto.disable_audio_output = settings.phone_audio;
         config.airplay.dock = settings.carplay_dock;
+        config.platform.presets.set(settings.presets);
         if let Some(channel) = settings.wifi_channel {
             config.wireless.channel = channel;
         }
@@ -243,6 +247,12 @@ mod tests {
             dpi_customized: true,
             phone_audio: true,
             carplay_dock: CarPlayDock::Bottom,
+            presets: [
+                PresetAction::VoiceAssistant,
+                PresetAction::AnswerCall,
+                PresetAction::EndCall,
+                PresetAction::None,
+            ],
             equalizer: prelude_media::EqualizerSettings {
                 enabled: true,
                 bands_half_db: [24; 10],
@@ -437,6 +447,25 @@ mod tests {
             .expect("apply settings");
             assert_eq!(config.airplay.dock, dock);
         }
+    }
+
+    #[test]
+    fn presets_are_applied_live_and_default_to_the_legacy_layout() {
+        let legacy: RuntimeSettings = toml::from_str("reported_dpi = 200\n").expect("legacy");
+        assert_eq!(legacy.presets, PresetAction::DEFAULTS);
+        let decoded: RuntimeSettings =
+            toml::from_str("presets = [\"home\", \"back\", \"voice_assistant\", \"end_call\"]\n")
+                .expect("decode");
+        let mut config = DaemonConfig::default();
+        let shared = config.platform.presets.clone();
+        decoded
+            .apply_to_config(&mut config)
+            .expect("apply settings");
+        assert_eq!(shared.actions(), decoded.presets);
+        assert!(toml::from_str::<RuntimeSettings>("presets = [\"home\"]\n").is_err());
+        assert!(
+            toml::from_str::<RuntimeSettings>("presets = [\"x\", \"x\", \"x\", \"x\"]\n").is_err()
+        );
     }
 
     #[test]

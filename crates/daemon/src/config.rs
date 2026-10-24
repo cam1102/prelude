@@ -8,7 +8,7 @@ use platform_superbird::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, Result};
+use crate::{Error, PresetBindings, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -313,6 +313,8 @@ pub struct PlatformConfig {
     pub ui_rotation_degrees: u16,
     pub diagnostic_level: DiagnosticLevel,
     pub ambient_light: AmbientLightConfig,
+    #[serde(skip)]
+    pub presets: PresetBindings,
 }
 
 impl std::fmt::Debug for PlatformConfig {
@@ -322,6 +324,7 @@ impl std::fmt::Debug for PlatformConfig {
             .field("ui_rotation_degrees", &self.ui_rotation_degrees)
             .field("diagnostic_level", &self.diagnostic_level)
             .field("ambient_light", &self.ambient_light)
+            .field("presets", &self.presets.actions())
             .finish()
     }
 }
@@ -332,6 +335,7 @@ impl Default for PlatformConfig {
             ui_rotation_degrees: 270,
             diagnostic_level: DiagnosticLevel::Info,
             ambient_light: AmbientLightConfig::default(),
+            presets: PresetBindings::default(),
         }
     }
 }

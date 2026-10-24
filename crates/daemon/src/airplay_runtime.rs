@@ -34,7 +34,7 @@ use platform_superbird::{
 use platform_superbird::{LinuxInputBackend, LinuxInputConfig, LinuxInputTerminal};
 use prelude_control::{
     AirPlayEvent, ControlEvent, ControlEventDecoder, InputWireSession, KnobButton, MediaButton,
-    MonotonicTimestamp, TouchAction,
+    MonotonicTimestamp, TelephonyButton, TouchAction,
 };
 
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
@@ -42,7 +42,8 @@ use crate::media_runtime::{LiveMediaRuntime, MediaCapabilities, MediaController}
 #[cfg(target_os = "linux")]
 use crate::shared_mfi::SharedMfi;
 use crate::{
-    AirPlayConfig, AudioRuntimeSnapshot, Iap2Config, MediaConfig, PlatformConfig,
+    AirPlayConfig, AudioRuntimeSnapshot, Iap2Config, MediaConfig, PlatformConfig, PresetAction,
+    PresetBindings,
     airplay_data_channel::{DataChannels, Iap2Tunnel, SharedIap2Tunnel},
     first_video::{FirstVideoAction, FirstVideoWatchdog},
     iap2_runtime::ReceiverStartMetadata,
@@ -948,6 +949,7 @@ impl AirPlayRuntime {
         let event_cancellation = cancellation.clone();
         let event_bind_address = bind_address.clone();
         let event_ambient_light = ambient_light.clone();
+        let event_presets = platform_config.presets.clone();
         #[cfg(all(target_os = "linux", feature = "linux-media"))]
         let event_media = media.as_ref().map(LiveMediaRuntime::controller);
         #[cfg(not(all(target_os = "linux", feature = "linux-media")))]
@@ -964,6 +966,7 @@ impl AirPlayRuntime {
                     &event_progress,
                     &event_cancellation,
                     &event_ambient_light,
+                    &event_presets,
                     accept_poll,
                     event_read_timeout,
                     io_timeout,
@@ -1701,6 +1704,7 @@ fn run_event_listener(
     progress: &SharedProgress,
     cancellation: &CancellationToken,
     ambient_light: &AmbientLightState,
+    presets: &PresetBindings,
     accept_poll: Duration,
     read_timeout: Duration,
     write_timeout: Duration,
@@ -1776,6 +1780,7 @@ fn run_event_listener(
                 progress,
                 cancellation,
                 ambient_light,
+                presets,
                 media.as_ref(),
                 #[cfg(all(target_os = "linux", feature = "linux-media"))]
                 display.as_ref(),
@@ -1829,6 +1834,7 @@ fn run_event_connection<S: Read + Write>(
         progress,
         cancellation,
         &AmbientLightState::default(),
+        &PresetBindings::default(),
         media,
         #[cfg(all(target_os = "linux", feature = "linux-media"))]
         None,
@@ -1844,6 +1850,7 @@ fn run_event_connection_with_ambient<S: Read + Write>(
     progress: &SharedProgress,
     cancellation: &CancellationToken,
     ambient_light: &AmbientLightState,
+    presets: &PresetBindings,
     media: Option<&MediaController>,
     #[cfg(all(target_os = "linux", feature = "linux-media"))] display: Option<
         &prelude_media::LinuxDisplayHandle,
@@ -1889,6 +1896,7 @@ fn run_event_connection_with_ambient<S: Read + Write>(
                     &mut last_timestamp,
                     progress,
                     media,
+                    presets,
                     input_suppressed,
                 )?;
             }
@@ -1975,6 +1983,7 @@ fn run_event_connection_with_ambient<S: Read + Write>(
                 &mut last_timestamp,
                 progress,
                 media,
+                presets,
                 input_suppressed,
             )?;
             if let Some(terminal) = terminal {
@@ -2167,6 +2176,7 @@ fn process_input_batch<W: Write>(
     last_timestamp: &mut MonotonicTimestamp,
     progress: &SharedProgress,
     media: Option<&MediaController>,
+    presets: &PresetBindings,
     input_suppressed: bool,
 ) -> Result<(), String> {
     for input in batch.events {
@@ -2174,7 +2184,7 @@ fn process_input_batch<W: Write>(
             continue;
         }
         *last_timestamp = MonotonicTimestamp(input.timestamp.0.max(last_timestamp.0));
-        match encode_platform_input(wire, input)? {
+        match encode_platform_input(wire, input, presets)? {
             InputDisposition::CarPlay { first, second } => {
                 let event_count = 1 + usize::from(second.is_some());
                 ensure_event_response_capacity(pending_responses, event_count)?;
@@ -2212,9 +2222,34 @@ enum InputDisposition {
     Reset,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum PresetInput {
+    Media(MediaButton),
+    Knob(KnobButton),
+    Telephony(TelephonyButton),
+    Siri,
+}
+
+impl PresetInput {
+    fn encode(
+        self,
+        wire: &mut InputWireSession,
+        pressed: bool,
+        timestamp: MonotonicTimestamp,
+    ) -> prelude_control::Result<AirPlayEvent> {
+        match self {
+            Self::Media(button) => wire.media_button(button, pressed, timestamp),
+            Self::Knob(button) => wire.knob_button(button, pressed, timestamp),
+            Self::Telephony(button) => wire.telephony_button(button, pressed, timestamp),
+            Self::Siri => wire.siri_button(pressed, timestamp),
+        }
+    }
+}
+
 fn encode_platform_input(
     wire: &mut InputWireSession,
     input: PlatformInputEvent,
+    presets: &PresetBindings,
 ) -> Result<InputDisposition, String> {
     let timestamp = MonotonicTimestamp(input.timestamp.0);
     let event = match input.kind {
@@ -2263,21 +2298,24 @@ fn encode_platform_input(
             return Ok(InputDisposition::LocalMute);
         }
         PlatformInputEventKind::Local(LocalInputAction::Preset(preset)) => {
-            let button = match preset.number() {
-                1 => MediaButton::Previous,
-                2 => MediaButton::PlayPause,
-                3 => MediaButton::Next,
-                4 => return Ok(InputDisposition::LocalMute),
-                number => {
-                    return Err(format!("unsupported Superbird preset number {number}"));
-                }
+            let control = match presets.action(preset) {
+                PresetAction::None => return Ok(InputDisposition::Ignore),
+                PresetAction::Mute => return Ok(InputDisposition::LocalMute),
+                PresetAction::PreviousTrack => PresetInput::Media(MediaButton::Previous),
+                PresetAction::PlayPause => PresetInput::Media(MediaButton::PlayPause),
+                PresetAction::NextTrack => PresetInput::Media(MediaButton::Next),
+                PresetAction::Home => PresetInput::Knob(KnobButton::Home),
+                PresetAction::Back => PresetInput::Knob(KnobButton::Back),
+                PresetAction::VoiceAssistant => PresetInput::Siri,
+                PresetAction::AnswerCall => PresetInput::Telephony(TelephonyButton::HookSwitch),
+                PresetAction::EndCall => PresetInput::Telephony(TelephonyButton::Drop),
             };
             let mut staged = wire.clone();
-            let pressed = staged
-                .media_button(button, true, timestamp)
+            let pressed = control
+                .encode(&mut staged, true, timestamp)
                 .map_err(|error| format!("encoding Superbird input for CarPlay failed: {error}"))?;
-            let released = staged
-                .media_button(button, false, timestamp)
+            let released = control
+                .encode(&mut staged, false, timestamp)
                 .map_err(|error| format!("encoding Superbird input for CarPlay failed: {error}"))?;
             *wire = staged;
             return Ok(InputDisposition::CarPlay {
@@ -4251,6 +4289,7 @@ mod tests {
                     pressed: true,
                 },
             },
+            &PresetBindings::default(),
         )
         .expect("knob");
         assert!(matches!(
@@ -4275,6 +4314,7 @@ mod tests {
                     steps: 3,
                 },
             },
+            &PresetBindings::default(),
         )
         .expect("rotary");
         assert!(matches!(
@@ -4287,6 +4327,7 @@ mod tests {
                 timestamp: MonotonicMicros(3),
                 kind: PlatformInputEventKind::SiriButton { pressed: true },
             },
+            &PresetBindings::default(),
         )
         .expect("Siri");
         assert!(matches!(
@@ -4305,6 +4346,7 @@ mod tests {
                 timestamp: MonotonicMicros(4),
                 kind: PlatformInputEventKind::VoiceAssistantCancel,
             },
+            &PresetBindings::default(),
         )
         .expect("voice cancellation");
         assert!(matches!(
@@ -4333,6 +4375,7 @@ mod tests {
                     timestamp: MonotonicMicros(timestamp),
                     kind: PlatformInputEventKind::Local(LocalInputAction::Preset(preset)),
                 },
+                &PresetBindings::default(),
             )
             .expect("playback preset");
             let InputDisposition::CarPlay {
@@ -4370,9 +4413,100 @@ mod tests {
                 timestamp: MonotonicMicros(4),
                 kind: PlatformInputEventKind::Local(LocalInputAction::Preset(LocalPreset::FOUR)),
             },
+            &PresetBindings::default(),
         )
         .expect("mute preset");
         assert!(matches!(mute, InputDisposition::LocalMute));
+    }
+
+    #[test]
+    fn remapped_presets_click_home_siri_and_telephony_controls() {
+        let mut wire = InputWireSession::new();
+        let presets = PresetBindings::default();
+        presets.set([
+            PresetAction::Home,
+            PresetAction::VoiceAssistant,
+            PresetAction::AnswerCall,
+            PresetAction::EndCall,
+        ]);
+        let mut clicks = Vec::new();
+        for (timestamp, preset) in [
+            LocalPreset::ONE,
+            LocalPreset::TWO,
+            LocalPreset::THREE,
+            LocalPreset::FOUR,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let InputDisposition::CarPlay {
+                first,
+                second: Some(second),
+            } = encode_platform_input(
+                &mut wire,
+                PlatformInputEvent {
+                    timestamp: MonotonicMicros(timestamp as u64 + 1),
+                    kind: PlatformInputEventKind::Local(LocalInputAction::Preset(preset)),
+                },
+                &presets,
+            )
+            .expect("remapped preset")
+            else {
+                panic!("remapped preset must produce a complete CarPlay click");
+            };
+            clicks.push((first.kind, second.kind));
+        }
+        assert_eq!(
+            clicks,
+            vec![
+                (
+                    AirPlayEventKind::Hid {
+                        device: HidDeviceKind::Knob,
+                        report: vec![2, 0, 0, 0],
+                    },
+                    AirPlayEventKind::Hid {
+                        device: HidDeviceKind::Knob,
+                        report: vec![0, 0, 0, 0],
+                    },
+                ),
+                (
+                    AirPlayEventKind::Siri(SiriAction::ButtonDown),
+                    AirPlayEventKind::Siri(SiriAction::ButtonUp),
+                ),
+                (
+                    AirPlayEventKind::Hid {
+                        device: HidDeviceKind::Telephony,
+                        report: vec![TelephonyButton::HookSwitch as u8],
+                    },
+                    AirPlayEventKind::Hid {
+                        device: HidDeviceKind::Telephony,
+                        report: vec![0],
+                    },
+                ),
+                (
+                    AirPlayEventKind::Hid {
+                        device: HidDeviceKind::Telephony,
+                        report: vec![TelephonyButton::Drop as u8],
+                    },
+                    AirPlayEventKind::Hid {
+                        device: HidDeviceKind::Telephony,
+                        report: vec![0],
+                    },
+                ),
+            ]
+        );
+        presets.set([PresetAction::None; 4]);
+        assert!(matches!(
+            encode_platform_input(
+                &mut wire,
+                PlatformInputEvent {
+                    timestamp: MonotonicMicros(5),
+                    kind: PlatformInputEventKind::Local(LocalInputAction::Preset(LocalPreset::ONE)),
+                },
+                &presets,
+            ),
+            Ok(InputDisposition::Ignore)
+        ));
     }
 
     #[test]
@@ -4411,6 +4545,7 @@ mod tests {
             &mut last_timestamp,
             &shared,
             Some(&media),
+            &PresetBindings::default(),
             false,
         )
         .expect("preset batch");
@@ -4482,6 +4617,7 @@ mod tests {
             &mut last_timestamp,
             &shared,
             Some(&media),
+            &PresetBindings::default(),
             true,
         )
         .expect("suppressed input batch");

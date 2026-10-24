@@ -66,8 +66,8 @@ use crate::hands_free::{CallBridge, CallSubscription};
 use crate::{
     AndroidAutoConfig, AudioBackend, AudioPipelineState, AudioRuntimeRoute, AudioRuntimeSnapshot,
     ConnectionStep, DaemonConfig, DisplayPlatform, DisplayStatus, Error, HealthState, MediaConfig,
-    ProjectionDevice, ProjectionMode, ProjectionRuntime, Result, RuntimeProbe,
-    persist_last_display_platform,
+    PresetAction, PresetBindings, ProjectionDevice, ProjectionMode, ProjectionRuntime, Result,
+    RuntimeProbe, persist_last_display_platform,
 };
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
 use crate::{
@@ -1308,6 +1308,7 @@ impl AudioIngressWindow {
 struct InputMapper {
     touches: BTreeMap<u8, TouchPointer>,
     siri_longpress_sent: bool,
+    presets: PresetBindings,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1319,10 +1320,11 @@ enum InputDisposition {
 }
 
 impl InputMapper {
-    fn new() -> Self {
+    fn new(presets: PresetBindings) -> Self {
         Self {
             touches: BTreeMap::new(),
             siri_longpress_sent: false,
+            presets,
         }
     }
 
@@ -1399,14 +1401,29 @@ impl InputMapper {
             PlatformInputEventKind::SettingsButton => InputDisposition::Ignore,
             PlatformInputEventKind::Local(LocalInputAction::Mute) => InputDisposition::LocalMute,
             PlatformInputEventKind::Local(LocalInputAction::Preset(preset)) => {
-                let key = match preset.number() {
-                    1 => MediaKey::Previous,
-                    2 => MediaKey::PlayPause,
-                    3 => MediaKey::Next,
-                    4 => return InputDisposition::LocalMute,
-                    _ => return InputDisposition::Protocol(Vec::new()),
+                let commands = match self.presets.action(preset) {
+                    PresetAction::None => return InputDisposition::Ignore,
+                    PresetAction::Mute => return InputDisposition::LocalMute,
+                    PresetAction::PreviousTrack => {
+                        media_key_pair(timestamp_micros, MediaKey::Previous)
+                    }
+                    PresetAction::PlayPause => {
+                        media_key_pair(timestamp_micros, MediaKey::PlayPause)
+                    }
+                    PresetAction::NextTrack => media_key_pair(timestamp_micros, MediaKey::Next),
+                    PresetAction::Home => button_pair(timestamp_micros, ProtocolButton::Home),
+                    PresetAction::Back => button_pair(timestamp_micros, ProtocolButton::Back),
+                    PresetAction::VoiceAssistant => {
+                        button_pair(timestamp_micros, ProtocolButton::Search)
+                    }
+                    PresetAction::AnswerCall => {
+                        button_pair(timestamp_micros, ProtocolButton::PhoneAccept)
+                    }
+                    PresetAction::EndCall => {
+                        button_pair(timestamp_micros, ProtocolButton::PhoneDecline)
+                    }
                 };
-                InputDisposition::Protocol(media_key_pair(timestamp_micros, key))
+                InputDisposition::Protocol(commands)
             }
             PlatformInputEventKind::Reset { .. } => {
                 self.siri_longpress_sent = false;
@@ -1489,6 +1506,17 @@ fn media_key_pair(timestamp_micros: u64, key: MediaKey) -> Vec<Command> {
     ]
 }
 
+fn button_pair(timestamp_micros: u64, button: ProtocolButton) -> Vec<Command> {
+    [true, false]
+        .map(|down| Command::Button {
+            timestamp_micros,
+            button,
+            down,
+            longpress: false,
+        })
+        .to_vec()
+}
+
 fn apply_local_mute(
     current: bool,
     apply: impl FnOnce(bool) -> std::result::Result<(), String>,
@@ -1553,6 +1581,7 @@ impl LiveMedia {
         status: SharedAudioStatus,
         progress: SharedProgress,
         hands_free: Option<&HandsFree>,
+        presets: PresetBindings,
     ) -> std::result::Result<Self, String> {
         if config.video != VideoBackend::AmlogicV4l2
             || config.audio != AudioBackend::AlsaUsb
@@ -1646,7 +1675,7 @@ impl LiveMedia {
             calls,
             call: None,
             input,
-            input_mapper: InputMapper::new(),
+            input_mapper: InputMapper::new(presets),
             input_suppressed: false,
             last_input_timestamp: 0,
             local_muted: false,
@@ -2444,6 +2473,7 @@ struct WorkerContext {
     ended_by_phone: AtomicBool,
     ping_timeout: Duration,
     hands_free: Option<HandsFree>,
+    presets: PresetBindings,
 }
 
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
@@ -2452,7 +2482,7 @@ fn run_worker(
     transport: WorkerTransport,
     config: AndroidAutoConfig,
     media_config: MediaConfig,
-    _platform: crate::PlatformConfig,
+    platform: crate::PlatformConfig,
     ambient_light: AmbientLightState,
     display: Option<LinuxDisplayHandle>,
     progress: SharedProgress,
@@ -2480,6 +2510,7 @@ fn run_worker(
         ended_by_phone: AtomicBool::new(false),
         ping_timeout,
         hands_free,
+        presets: platform.presets,
     };
     let result = match transport {
         WorkerTransport::Usb(candidate) => {
@@ -2616,6 +2647,7 @@ fn run_protocol<T: std::io::Read + std::io::Write + Send>(
         ended_by_phone,
         ping_timeout,
         hands_free,
+        presets,
     } = context;
     let audio_output = !config.disable_audio_output;
     if let Some(address) = &bluetooth_address {
@@ -2688,6 +2720,7 @@ fn run_protocol<T: std::io::Read + std::io::Write + Send>(
                                 Arc::clone(audio_status),
                                 Arc::clone(progress),
                                 hands_free.as_ref(),
+                                presets.clone(),
                             )?);
                             if let Some(active) = pending_voice_session.take() {
                                 media
@@ -3020,7 +3053,7 @@ mod tests {
 
     #[test]
     fn input_mapper_preserves_touch_state_and_maps_knob_siri_rotary_and_local_actions() {
-        let mut mapper = InputMapper::new();
+        let mut mapper = InputMapper::new(PresetBindings::default());
         let down = mapper.map(input(
             10,
             PlatformInputEventKind::Touch {
@@ -3186,6 +3219,41 @@ mod tests {
                 PlatformInputEventKind::Local(LocalInputAction::Preset(LocalPreset::FOUR))
             )),
             InputDisposition::LocalMute
+        );
+    }
+
+    #[test]
+    fn remapped_presets_send_buttons_and_follow_live_updates() {
+        let presets = PresetBindings::default();
+        let mut mapper = InputMapper::new(presets.clone());
+        presets.set([
+            PresetAction::Home,
+            PresetAction::VoiceAssistant,
+            PresetAction::AnswerCall,
+            PresetAction::None,
+        ]);
+        for (preset, expected) in [
+            (LocalPreset::ONE, ProtocolButton::Home),
+            (LocalPreset::TWO, ProtocolButton::Search),
+            (LocalPreset::THREE, ProtocolButton::PhoneAccept),
+        ] {
+            assert!(matches!(
+                mapper.map(input(1, PlatformInputEventKind::Local(LocalInputAction::Preset(preset)))),
+                InputDisposition::Protocol(commands) if matches!(
+                    commands.as_slice(),
+                    [
+                        Command::Button { button: down, down: true, longpress: false, .. },
+                        Command::Button { button: up, down: false, longpress: false, .. },
+                    ] if *down == expected && *up == expected
+                )
+            ));
+        }
+        assert_eq!(
+            mapper.map(input(
+                2,
+                PlatformInputEventKind::Local(LocalInputAction::Preset(LocalPreset::FOUR))
+            )),
+            InputDisposition::Ignore
         );
     }
 

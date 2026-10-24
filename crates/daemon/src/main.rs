@@ -184,6 +184,7 @@ async fn main() -> Result<()> {
             daemon.config().state_dir.clone(),
             runtime_settings,
             daemon.config().media.equalizer.clone(),
+            daemon.config().platform.presets.clone(),
             ambient_control.clone(),
             wireless.as_ref().map(WirelessService::directory),
         )

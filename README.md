@@ -85,12 +85,13 @@ Prelude supports both wired and wireless connections.
 ### Controls
 - Navigate by using the touch screen or the knob.
 - Press the knob to confirm, or back to exit.
-- Press the first preset button to skip back a track.
-- Press the second preset button to play/pause.
-- Press the third preset button to skip forward a track.
-- Press the fourth preset button to toggle mute.
+- By default, the four preset buttons skip back a track, play/pause, skip forward a track, and toggle mute. To change them, see [Preset buttons](#preset-buttons).
 - Press right-most top hardware button to open settings.
 - Hold the right-most top hardware button to trigger Siri/Google Assistant.
+
+### Preset buttons
+
+Open **Settings → Preset buttons** to choose what each of the four top buttons does, numbered left to right. The options are previous track, play/pause, next track, mute, home, back, voice assistant (Siri or Google Assistant), answer call, end call, or nothing. Every option works on both CarPlay and Android Auto. The new mapping applies as soon as settings close.
 
 ### Equalizer
 

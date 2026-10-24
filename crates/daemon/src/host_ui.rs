@@ -20,7 +20,8 @@ use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 
 use crate::{
-    CarPlayDock, KnownPhone, RuntimeSettings, WirelessPhoneDirectory,
+    CarPlayDock, KnownPhone, PRESET_COUNT, PresetAction, PresetBindings, RuntimeSettings,
+    WirelessPhoneDirectory,
     fonts::{self, FontSet},
 };
 
@@ -103,6 +104,7 @@ impl HostUi {
         state_dir: PathBuf,
         settings: RuntimeSettings,
         equalizer_control: prelude_media::EqualizerControl,
+        presets: PresetBindings,
         ambient_light: Option<AmbientLightControl>,
         phones: Option<WirelessPhoneDirectory>,
     ) -> Result<Self, String> {
@@ -119,6 +121,7 @@ impl HostUi {
                     state_dir,
                     settings,
                     equalizer_control,
+                    presets,
                     ambient_light,
                     phones,
                     events_tx,
@@ -227,6 +230,7 @@ enum Page {
     Phones,
     Phone,
     Density,
+    Presets,
     Wifi,
     Equalizer,
 }
@@ -241,6 +245,9 @@ enum Item {
     CarPlayDock,
     PhoneAudio,
     Equalizer,
+    Presets,
+    Preset(usize),
+    PresetsReset,
     Version,
     Phone(usize),
     Connect,
@@ -258,6 +265,7 @@ impl Item {
             self,
             Self::DensitySlider
                 | Self::CarPlayDock
+                | Self::Preset(_)
                 | Self::WifiBand
                 | Self::WifiChannel
                 | Self::WifiWidth
@@ -434,6 +442,8 @@ struct SettingsUi<D> {
     staged_dpi_customized: bool,
     staged_phone_audio: bool,
     staged_dock: CarPlayDock,
+    presets: PresetBindings,
+    staged_presets: [PresetAction; PRESET_COUNT],
     staged_radio: Option<(u8, ChannelWidth)>,
     page: Page,
     focus: usize,
@@ -466,6 +476,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
         state_dir: PathBuf,
         settings: RuntimeSettings,
         equalizer_control: prelude_media::EqualizerControl,
+        presets: PresetBindings,
         ambient_light: Option<AmbientLightControl>,
         directory: Option<WirelessPhoneDirectory>,
         events: Sender<HostUiEvent>,
@@ -485,6 +496,8 @@ impl<D: OverlaySurface> SettingsUi<D> {
             staged_dpi_customized: settings.dpi_customized,
             staged_phone_audio: settings.phone_audio,
             staged_dock: settings.carplay_dock,
+            presets,
+            staged_presets: settings.presets,
             staged_radio: settings.wifi_radio(),
             page: Page::Settings,
             focus: 0,
@@ -605,6 +618,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
             || self.staged_dpi_customized != self.settings.dpi_customized
             || self.staged_phone_audio != self.settings.phone_audio
             || self.staged_dock != self.settings.carplay_dock
+            || self.staged_presets != self.settings.presets
             || self.staged_radio != self.settings.wifi_radio()
     }
 
@@ -622,6 +636,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
                     ],
                 ),
                 Section::titled("Audio", vec![Item::PhoneAudio, Item::Equalizer]),
+                Section::titled("Controls", vec![Item::Presets]),
                 Section::titled("Advanced", vec![Item::Wifi, Item::Version]),
             ],
             Page::Phones => vec![Section::plain(
@@ -639,6 +654,10 @@ impl<D: OverlaySurface> SettingsUi<D> {
             Page::Density => vec![
                 Section::plain(vec![Item::DensitySlider, Item::DensityReset])
                     .footer("CarPlay and Android Auto restart after settings close"),
+            ],
+            Page::Presets => vec![
+                Section::plain((0..PRESET_COUNT).map(Item::Preset).collect()),
+                Section::plain(vec![Item::PresetsReset]),
             ],
             Page::Wifi if self.wifi_available() => vec![
                 Section::plain(vec![Item::WifiBand, Item::WifiChannel, Item::WifiWidth])
@@ -696,6 +715,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
         self.staged_dpi_customized = self.settings.dpi_customized;
         self.staged_phone_audio = self.settings.phone_audio;
         self.staged_dock = self.settings.carplay_dock;
+        self.staged_presets = self.settings.presets;
         self.staged_radio = self.settings.wifi_radio();
         self.editing = false;
         self.touch = None;
@@ -717,6 +737,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
         next.dpi_customized = self.staged_dpi_customized;
         next.phone_audio = self.staged_phone_audio;
         next.carplay_dock = self.staged_dock;
+        next.presets = self.staged_presets;
         if let Some((channel, width)) = self.staged_radio {
             next.wifi_channel = Some(channel);
             next.wifi_channel_width_mhz = Some(width.mhz());
@@ -732,6 +753,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
             || next.phone_audio != self.settings.phone_audio
             || next.carplay_dock != self.settings.carplay_dock;
         let radio_changed = next.wifi_radio() != self.settings.wifi_radio();
+        self.presets.set(next.presets);
         self.settings = next;
         self.menu_open = false;
         self.leave_subpage();
@@ -902,6 +924,8 @@ impl<D: OverlaySurface> SettingsUi<D> {
             Item::Density => self.enter(Page::Density),
             Item::PhoneAudio => self.toggle_phone_audio(),
             Item::Equalizer => self.enter(Page::Equalizer),
+            Item::Presets => self.enter(Page::Presets),
+            Item::PresetsReset => self.reset_presets(),
             Item::Version => {}
             Item::Phone(index) => self.open_phone(index),
             Item::Connect => self.connect_opened_phone(),
@@ -909,6 +933,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
             Item::DensityReset => self.restore_original_dpi(),
             Item::DensitySlider
             | Item::CarPlayDock
+            | Item::Preset(_)
             | Item::WifiBand
             | Item::WifiChannel
             | Item::WifiWidth => self.adjust(item, 1, true),
@@ -926,6 +951,13 @@ impl<D: OverlaySurface> SettingsUi<D> {
                 self.staged_dock = step_option(&CarPlayDock::ALL, self.staged_dock, delta, wrap);
                 self.error_message = None;
                 self.redraw();
+            }
+            Item::Preset(index) => {
+                if let Some(action) = self.staged_presets.get_mut(index) {
+                    *action = step_option(&PresetAction::ALL, *action, delta, wrap);
+                    self.error_message = None;
+                    self.redraw();
+                }
             }
             Item::WifiBand | Item::WifiChannel | Item::WifiWidth => {
                 if let Some(radio) = self.staged_radio {
@@ -1095,6 +1127,13 @@ impl<D: OverlaySurface> SettingsUi<D> {
         self.redraw();
     }
 
+    fn reset_presets(&mut self) {
+        self.staged_presets = PresetAction::DEFAULTS;
+        self.editing = false;
+        self.error_message = None;
+        self.redraw();
+    }
+
     fn toggle_auto_brightness(&mut self) {
         let mut next = self.settings;
         next.auto_brightness = !next.auto_brightness;
@@ -1202,6 +1241,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
             Page::Phones => "Phones",
             Page::Phone => self.opened().map_or("Phone", |phone| phone.name.as_str()),
             Page::Density => "Screen density",
+            Page::Presets => "Preset buttons",
             Page::Wifi => "Wi-Fi",
             Page::Equalizer => "Equalizer",
         }
@@ -1495,6 +1535,14 @@ impl<D: OverlaySurface> SettingsUi<D> {
         );
     }
 
+    fn option_trailing(&self, item: Item, value: &str) -> Trailing {
+        if self.editing && self.focused_item() == Some(item) {
+            Trailing::Value(format!("‹  {value}  ›"), GREEN)
+        } else {
+            Trailing::Value(value.to_owned(), SECONDARY)
+        }
+    }
+
     fn row_view(&self, item: Item) -> RowView {
         let on_off = |on: bool| if on { "On" } else { "Off" }.to_owned();
         match item {
@@ -1529,15 +1577,10 @@ impl<D: OverlaySurface> SettingsUi<D> {
                 "Screen density",
                 Trailing::Link(format!("{} dpi", self.staged_dpi), SECONDARY),
             ),
-            Item::CarPlayDock => {
-                let value = self.staged_dock.label();
-                let trailing = if self.editing && self.focused_item() == Some(item) {
-                    Trailing::Value(format!("‹  {value}  ›"), GREEN)
-                } else {
-                    Trailing::Value(value.to_owned(), SECONDARY)
-                };
-                RowView::new("CarPlay dock", trailing)
-            }
+            Item::CarPlayDock => RowView::new(
+                "CarPlay dock",
+                self.option_trailing(item, self.staged_dock.label()),
+            ),
             Item::PhoneAudio => {
                 RowView::new("Phone audio", Trailing::Switch(self.staged_phone_audio))
                     .detail("Keep sound on your phone")
@@ -1545,6 +1588,35 @@ impl<D: OverlaySurface> SettingsUi<D> {
             Item::Equalizer => RowView::new(
                 "Equalizer",
                 Trailing::Link(on_off(self.equalizer_ui.settings.enabled), SECONDARY),
+            ),
+            Item::Presets => {
+                let summary = if self.staged_presets == PresetAction::DEFAULTS {
+                    "Default"
+                } else {
+                    "Custom"
+                };
+                RowView::new(
+                    "Preset buttons",
+                    Trailing::Link(summary.to_owned(), SECONDARY),
+                )
+            }
+            Item::Preset(index) => {
+                let action = self
+                    .staged_presets
+                    .get(index)
+                    .copied()
+                    .unwrap_or(PresetAction::None);
+                RowView::new(
+                    format!("Button {}", index + 1),
+                    self.option_trailing(item, action.label()),
+                )
+            }
+            Item::PresetsReset => RowView::new("Reset to default", Trailing::None).color(
+                if self.staged_presets == PresetAction::DEFAULTS {
+                    SECONDARY
+                } else {
+                    WHITE
+                },
             ),
             Item::Version => {
                 RowView::new("Version", Trailing::Value(self.version.clone(), SECONDARY))
@@ -1594,13 +1666,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
                     Item::WifiChannel => ("Channel", channel.to_string()),
                     _ => ("Channel width", format!("{} MHz", width.mhz())),
                 };
-                let editing = self.editing && self.focused_item() == Some(item);
-                let trailing = if editing {
-                    Trailing::Value(format!("‹  {value}  ›"), GREEN)
-                } else {
-                    Trailing::Value(value, SECONDARY)
-                };
-                RowView::new(label, trailing)
+                RowView::new(label, self.option_trailing(item, &value))
             }
             Item::DensitySlider => RowView::new("Density", Trailing::None),
         }
@@ -2016,6 +2082,7 @@ mod tests {
                 state.path().to_path_buf(),
                 settings,
                 prelude_media::EqualizerControl::default(),
+                PresetBindings::default(),
                 None,
                 None,
                 sender,
@@ -2135,8 +2202,8 @@ mod tests {
     fn settings_sections_stack_without_overlap_and_scroll_to_the_last_row() {
         let harness = Harness::new();
         let layout = harness.ui.layout();
-        assert_eq!(layout.groups.len(), 4);
-        assert_eq!(layout.captions.len(), 3);
+        assert_eq!(layout.groups.len(), 5);
+        assert_eq!(layout.captions.len(), 4);
         for pair in layout.rows.windows(2) {
             assert!(pair[0].bottom() <= pair[1].top, "{pair:?}");
         }
@@ -2293,6 +2360,44 @@ mod tests {
             })]
         ));
         assert_eq!(harness.ui.settings.carplay_dock, CarPlayDock::Right);
+    }
+
+    #[test]
+    fn preset_buttons_are_remapped_live_on_close_without_a_projection_restart() {
+        let mut harness = Harness::new();
+        let live = harness.ui.presets.clone();
+        harness.focus(Item::Presets);
+        harness.press(KnobInputButton::Select);
+        assert_eq!(harness.ui.page, Page::Presets);
+        harness.focus(Item::Preset(0));
+        harness.press(KnobInputButton::Select);
+        harness.turn(4);
+        assert_eq!(harness.ui.staged_presets[0], PresetAction::Home);
+        harness.turn(-6);
+        assert_eq!(harness.ui.staged_presets[0], PresetAction::PreviousTrack);
+        harness.turn(-1);
+        harness.press(KnobInputButton::Back);
+        harness.tap(400, harness.screen_y(Item::Preset(3)));
+        assert_eq!(harness.ui.staged_presets[3], PresetAction::Home);
+        assert_eq!(live.actions(), PresetAction::DEFAULTS);
+        harness.focus(Item::PresetsReset);
+        harness.press(KnobInputButton::Select);
+        assert_eq!(harness.ui.staged_presets, PresetAction::DEFAULTS);
+        harness.tap(400, harness.screen_y(Item::Preset(3)));
+        harness.press(KnobInputButton::Back);
+        assert_eq!(harness.ui.page, Page::Settings);
+        assert!(harness.ui.has_staged_changes());
+        harness.press(KnobInputButton::Back);
+        assert!(!harness.ui.menu_open);
+        let expected = [
+            PresetAction::PreviousTrack,
+            PresetAction::PlayPause,
+            PresetAction::NextTrack,
+            PresetAction::Home,
+        ];
+        assert_eq!(live.actions(), expected);
+        assert_eq!(harness.ui.settings.presets, expected);
+        assert!(harness.events.try_iter().next().is_none());
     }
 
     #[test]
@@ -2463,7 +2568,9 @@ mod tests {
              Band Channel width MHz ‹ › restarts Wireless is off Enable wireless projection \
              manage change No saved phones you connect wirelessly show up here Neel's \
              Reset flat Preamp +12.0 dB All USB output EQ curve unavailable bypasses 31 63 125 \
-             250 500 1k 2k 4k 8k 16k −24 USB audio only Turn choose Press adjust finish Release"
+             250 500 1k 2k 4k 8k 16k −24 USB audio only Turn choose Press adjust finish Release \
+             Controls Preset buttons Default Custom Button 1 2 3 4 Previous track Play/Pause Next \
+             Mute Home Back Voice assistant Answer call End Reset to default"
                 .chars()
         {
             assert!(
@@ -2498,6 +2605,14 @@ mod tests {
         harness.press(KnobInputButton::Select);
         harness.focus(Item::Version);
         capture(&harness, "settings-bottom");
+        harness.focus(Item::Presets);
+        harness.press(KnobInputButton::Select);
+        harness.focus(Item::Preset(1));
+        harness.press(KnobInputButton::Select);
+        harness.turn(5);
+        capture(&harness, "presets");
+        harness.press(KnobInputButton::Back);
+        harness.press(KnobInputButton::Back);
         harness.focus(Item::Equalizer);
         harness.press(KnobInputButton::Select);
         capture(&harness, "equalizer");

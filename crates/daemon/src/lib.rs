@@ -25,6 +25,7 @@ mod known_phones;
 mod media_runtime;
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
 mod pairing_code;
+mod presets;
 mod settings;
 #[cfg(target_os = "linux")]
 mod shared_mfi;
@@ -61,6 +62,7 @@ pub use heartbeat::HeartbeatWriter;
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
 pub use host_ui::{HostUi, HostUiEvent, SettingsCommitted};
 pub use known_phones::{KnownPhone, MAXIMUM_KNOWN_PHONES};
+pub use presets::{PRESET_COUNT, PresetAction, PresetBindings};
 pub use settings::{RuntimeSettings, SettingsError};
 
 pub use wired_runtime::{
