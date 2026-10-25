@@ -1772,6 +1772,9 @@ fn timing_worker(
                     TimingEvent::Sample(sample) => {
                         feedback_clock.update_timing(sample.offset_ns, sample.round_trip_ns)?;
                     }
+                    TimingEvent::Stale => {
+                        tracing::debug!("ignored a late or duplicate CarPlay timing response");
+                    }
                     TimingEvent::Teardown => {}
                 }
             }

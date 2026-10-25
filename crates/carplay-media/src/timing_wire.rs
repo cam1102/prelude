@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::{Error, Result};
 
 pub const TIMING_PACKET_LENGTH: usize = 32;
@@ -6,6 +8,7 @@ pub const TIMING_RESPONSE_TYPE: u8 = 211;
 
 const NTP_SCALE: i128 = 1_i128 << 32;
 const NANOS_PER_SECOND: i128 = 1_000_000_000;
+const STALE_REQUEST_HISTORY: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NtpTimestamp(u64);
@@ -107,6 +110,7 @@ pub struct TimingSample {
 pub enum TimingEvent {
     Response([u8; TIMING_PACKET_LENGTH]),
     Sample(TimingSample),
+    Stale,
     Teardown,
 }
 
@@ -135,6 +139,7 @@ impl TimingState {
 pub struct TimingCodec {
     state: TimingState,
     pending_transmit: Option<NtpTimestamp>,
+    previous_transmits: VecDeque<NtpTimestamp>,
     synchronized: bool,
 }
 
@@ -143,6 +148,7 @@ impl Default for TimingCodec {
         Self {
             state: TimingState::Idle,
             pending_transmit: None,
+            previous_transmits: VecDeque::with_capacity(STALE_REQUEST_HISTORY),
             synchronized: false,
         }
     }
@@ -167,6 +173,10 @@ impl TimingCodec {
             transmit,
         }
         .encode();
+        if self.previous_transmits.len() == STALE_REQUEST_HISTORY {
+            self.previous_transmits.pop_front();
+        }
+        self.previous_transmits.push_back(transmit);
         self.pending_transmit = Some(transmit);
         self.state = TimingState::Pending;
         Ok(packet)
@@ -246,6 +256,11 @@ impl TimingCodec {
                 ))
             }
             TimingPacketKind::Response => {
+                if self.pending_transmit != Some(packet.originate)
+                    && self.previous_transmits.contains(&packet.originate)
+                {
+                    return Ok(TimingEvent::Stale);
+                }
                 let pending = self.pending_transmit.ok_or_else(|| {
                     Error::InvalidTiming("unsolicited or replayed timing response".to_owned())
                 })?;
@@ -374,15 +389,17 @@ mod tests {
         assert_eq!(sample.offset_ns, 500_000_000);
         assert_eq!(sample.round_trip_ns, 3_000_000_000);
         assert_eq!(codec.state(), TimingState::Synchronized);
-        assert!(matches!(
-            codec.receive(
-                &response,
-                NtpTimestamp::new(104 * SECOND),
-                NtpTimestamp::new(104 * SECOND)
-            ),
-            Err(Error::InvalidTiming(_))
-        ));
-        assert_eq!(codec.state(), TimingState::Failed);
+        assert_eq!(
+            codec
+                .receive(
+                    &response,
+                    NtpTimestamp::new(104 * SECOND),
+                    NtpTimestamp::new(104 * SECOND)
+                )
+                .expect("replayed response"),
+            TimingEvent::Stale
+        );
+        assert_eq!(codec.state(), TimingState::Synchronized);
     }
 
     #[test]
@@ -461,6 +478,57 @@ mod tests {
             ),
             Err(Error::InvalidTiming(_))
         ));
+    }
+
+    #[test]
+    fn late_and_duplicate_responses_to_sent_requests_are_stale() {
+        let response = |originate: NtpTimestamp| {
+            TimingPacket {
+                kind: TimingPacketKind::Response,
+                originate,
+                receive: NtpTimestamp::new(originate.raw() + SECOND / 10),
+                transmit: NtpTimestamp::new(originate.raw() + SECOND / 10),
+            }
+            .encode()
+        };
+        let mut codec = TimingCodec::default();
+        let first = NtpTimestamp::new(10 * SECOND);
+        let second = NtpTimestamp::new(11 * SECOND);
+        codec.request(first).expect("first request");
+        codec.expire_pending().expect("expire");
+        codec.request(second).expect("second request");
+
+        assert_eq!(
+            codec
+                .receive(
+                    &response(first),
+                    NtpTimestamp::new(11 * SECOND + SECOND / 2),
+                    NtpTimestamp::ZERO
+                )
+                .expect("late response"),
+            TimingEvent::Stale
+        );
+        assert_eq!(codec.state(), TimingState::Pending);
+
+        let event = codec
+            .receive(
+                &response(second),
+                NtpTimestamp::new(11 * SECOND + SECOND / 5),
+                NtpTimestamp::ZERO,
+            )
+            .expect("current response");
+        assert!(matches!(event, TimingEvent::Sample(_)));
+        assert_eq!(
+            codec
+                .receive(
+                    &response(second),
+                    NtpTimestamp::new(11 * SECOND + SECOND / 4),
+                    NtpTimestamp::ZERO
+                )
+                .expect("duplicate response"),
+            TimingEvent::Stale
+        );
+        assert_eq!(codec.state(), TimingState::Synchronized);
     }
 
     #[test]
