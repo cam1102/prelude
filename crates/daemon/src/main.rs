@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use clap::Parser;
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
@@ -224,19 +224,29 @@ async fn main() -> Result<()> {
     let mut persisted_audio_generation = 0_u64;
     #[cfg(all(target_os = "linux", feature = "linux-media"))]
     let mut persisted_audio_frames = 0_u64;
+    #[cfg(all(target_os = "linux", feature = "linux-media"))]
+    let mut logged_audio_status: Option<AudioRuntimeSnapshot> = None;
+    let mut logged_failures = BTreeMap::<String, String>::new();
     loop {
         let snapshot = daemon.poll()?;
-        if snapshot.overall == preluded::OverallHealth::Failed {
-            for (component, health) in snapshot.health.components() {
-                if health.required && health.state == HealthState::Failed {
-                    warn!(
-                        component,
-                        detail = health.detail,
-                        "required diagnostic failed"
-                    );
-                }
+        let failures = snapshot
+            .health
+            .components()
+            .iter()
+            .filter(|(_, health)| health.required && health.state == HealthState::Failed)
+            .map(|(component, health)| (component.clone(), health.detail.clone()))
+            .collect::<BTreeMap<_, _>>();
+        for (component, detail) in &failures {
+            if logged_failures.get(component) != Some(detail) {
+                warn!(component, detail, "required diagnostic failed");
             }
         }
+        for component in logged_failures.keys() {
+            if !failures.contains_key(component) {
+                info!(component, "required diagnostic recovered");
+            }
+        }
+        logged_failures = failures;
         #[cfg(all(target_os = "linux", feature = "linux-media"))]
         let host_ui_events = host_ui
             .as_ref()
@@ -340,7 +350,10 @@ async fn main() -> Result<()> {
             let now = std::time::Instant::now();
             if now >= next_audio_diagnostic {
                 let status = daemon.audio_status_snapshot();
-                info!(status = ?status, "audio runtime diagnostic");
+                if logged_audio_status.as_ref() != Some(&status) {
+                    info!(status = ?status, "audio runtime diagnostic");
+                    logged_audio_status = Some(status.clone());
+                }
                 next_audio_diagnostic = now + std::time::Duration::from_secs(2);
                 if should_persist_audio_diagnostic(
                     &status,
