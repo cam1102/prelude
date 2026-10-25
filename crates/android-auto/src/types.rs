@@ -119,7 +119,7 @@ impl Default for AccessoryIdentity {
             model: "Android Auto".to_owned(),
             description: "Prelude wired Android Auto host".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
-            uri: "https://github.com/68p/ct-carplay".to_owned(),
+            uri: "https://github.com/usenocturne/prelude".to_owned(),
             serial: "prelude".to_owned(),
         }
     }
