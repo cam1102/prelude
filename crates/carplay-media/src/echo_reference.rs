@@ -2,12 +2,12 @@
 
 use std::sync::{
     Mutex,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicU64, Ordering},
 };
 
 use gstreamer as gst;
 
-use crate::{Error, Result};
+use crate::{EchoTuning, Error, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EchoReference {
@@ -17,14 +17,24 @@ pub(crate) struct EchoReference {
 
 static ACTIVE: Mutex<Option<EchoReference>> = Mutex::new(None);
 static GENERATION: AtomicU64 = AtomicU64::new(0);
-static ENABLED: AtomicBool = AtomicBool::new(false);
+static TUNING: Mutex<EchoTuning> = Mutex::new(EchoTuning::DEFAULT);
 
-pub(crate) fn set_enabled(enabled: bool) {
-    ENABLED.store(enabled, Ordering::Relaxed);
+fn tuning_slot() -> std::sync::MutexGuard<'static, EchoTuning> {
+    TUNING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+pub(crate) fn set_tuning(tuning: EchoTuning) {
+    *tuning_slot() = tuning;
+}
+
+pub(crate) fn tuning() -> EchoTuning {
+    *tuning_slot()
 }
 
 pub(crate) fn enabled() -> bool {
-    ENABLED.load(Ordering::Relaxed)
+    tuning().enabled
 }
 
 pub(crate) fn next_probe_name() -> String {
@@ -113,9 +123,15 @@ mod tests {
             base_time: gst::ClockTime::from_nseconds(1),
         })
         .expect("publish while plugin may be missing");
-        set_enabled(false);
+        set_tuning(EchoTuning {
+            enabled: false,
+            ..EchoTuning::DEFAULT
+        });
         assert!(current_for_capture().expect("setting off").is_none());
-        set_enabled(true);
+        set_tuning(EchoTuning {
+            enabled: true,
+            ..EchoTuning::DEFAULT
+        });
         let _ = gst::init();
         let selected = current_for_capture().expect("capture reference");
         if available() {
@@ -123,7 +139,7 @@ mod tests {
         } else {
             assert!(selected.is_none());
         }
-        set_enabled(false);
+        set_tuning(EchoTuning::DEFAULT);
         retract(&second).expect("cleanup");
         if let Some(saved) = saved {
             publish(saved).expect("restore echo reference");

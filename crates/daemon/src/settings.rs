@@ -14,6 +14,10 @@ use crate::{CarPlayDock, DaemonConfig, PRESET_COUNT, PresetAction};
 const SETTINGS_FILE: &str = "settings.toml";
 const MAXIMUM_SETTINGS_BYTES: u64 = 2048;
 
+fn default_on() -> bool {
+    true
+}
+
 #[derive(Debug, Error)]
 pub enum SettingsError {
     #[error("reading settings failed: {0}")]
@@ -45,6 +49,12 @@ pub struct RuntimeSettings {
     pub dpi_customized: bool,
     pub phone_audio: bool,
     pub echo_cancellation: bool,
+    #[serde(default = "default_on")]
+    pub noise_suppression: bool,
+    pub noise_suppression_level: prelude_media::NoiseSuppressionLevel,
+    #[serde(default = "default_on")]
+    pub high_pass_filter: bool,
+    pub gain_control: bool,
     pub carplay_dock: CarPlayDock,
     pub presets: [PresetAction; PRESET_COUNT],
     pub equalizer: prelude_media::EqualizerSettings,
@@ -62,6 +72,10 @@ impl Default for RuntimeSettings {
             dpi_customized: false,
             phone_audio: false,
             echo_cancellation: false,
+            noise_suppression: true,
+            noise_suppression_level: prelude_media::NoiseSuppressionLevel::Moderate,
+            high_pass_filter: true,
+            gain_control: false,
             carplay_dock: CarPlayDock::Left,
             presets: PresetAction::DEFAULTS,
             equalizer: Default::default(),
@@ -86,6 +100,10 @@ impl RuntimeSettings {
             phone_audio: config.airplay.disable_audio_output
                 && config.android_auto.disable_audio_output,
             echo_cancellation: false,
+            noise_suppression: true,
+            noise_suppression_level: prelude_media::NoiseSuppressionLevel::Moderate,
+            high_pass_filter: true,
+            gain_control: false,
             carplay_dock: config.airplay.dock,
             presets: config.platform.presets.actions(),
             equalizer: config.media.equalizer.settings(),
@@ -153,7 +171,7 @@ impl RuntimeSettings {
         config.airplay.disable_audio_output = settings.phone_audio;
         config.android_auto.disable_audio_output = settings.phone_audio;
         #[cfg(all(target_os = "linux", feature = "linux-media"))]
-        prelude_media::set_echo_cancellation(settings.use_echo_cancellation(config.media.audio));
+        prelude_media::set_echo_cancellation(settings.echo_tuning(config.media.audio));
         config.airplay.dock = settings.carplay_dock;
         config.platform.presets.set(settings.presets);
         if let Some(channel) = settings.wifi_channel {
@@ -175,6 +193,20 @@ impl RuntimeSettings {
 
     fn use_echo_cancellation(&self, audio: crate::AudioBackend) -> bool {
         self.echo_cancellation && !self.phone_audio && audio == crate::AudioBackend::AlsaUsb
+    }
+
+    pub(crate) fn echo_knobs(&self) -> prelude_media::EchoTuning {
+        self.echo_tuning(crate::AudioBackend::None)
+    }
+
+    pub(crate) fn echo_tuning(&self, audio: crate::AudioBackend) -> prelude_media::EchoTuning {
+        prelude_media::EchoTuning {
+            enabled: self.use_echo_cancellation(audio),
+            noise_suppression: self.noise_suppression,
+            noise_suppression_level: self.noise_suppression_level,
+            high_pass_filter: self.high_pass_filter,
+            gain_control: self.gain_control,
+        }
     }
 
     pub fn load(state_dir: &Path, defaults: Self) -> Result<Self, SettingsError> {
@@ -256,6 +288,10 @@ mod tests {
             dpi_customized: true,
             phone_audio: true,
             echo_cancellation: true,
+            noise_suppression: false,
+            noise_suppression_level: prelude_media::NoiseSuppressionLevel::VeryHigh,
+            high_pass_filter: false,
+            gain_control: true,
             carplay_dock: CarPlayDock::Bottom,
             presets: [
                 PresetAction::VoiceAssistant,
@@ -501,6 +537,68 @@ mod tests {
         };
         assert!(!phone_audio.use_echo_cancellation(crate::AudioBackend::AlsaUsb));
         assert!(!RuntimeSettings::default().use_echo_cancellation(crate::AudioBackend::AlsaUsb));
+    }
+
+    #[test]
+    fn echo_knobs_default_when_absent_and_apply_only_while_echo_is_armed() {
+        let legacy: RuntimeSettings = toml::from_str("reported_dpi = 200\n").expect("legacy");
+        assert!(legacy.noise_suppression);
+        assert_eq!(
+            legacy.noise_suppression_level,
+            prelude_media::NoiseSuppressionLevel::Moderate
+        );
+        assert!(legacy.high_pass_filter);
+        assert!(!legacy.gain_control);
+        assert!(
+            legacy
+                .echo_tuning(crate::AudioBackend::AlsaUsb)
+                .noise_level()
+                .is_none()
+        );
+
+        let tuned = RuntimeSettings {
+            echo_cancellation: true,
+            noise_suppression: true,
+            noise_suppression_level: prelude_media::NoiseSuppressionLevel::High,
+            high_pass_filter: false,
+            gain_control: true,
+            ..RuntimeSettings::default()
+        };
+        let armed = tuned.echo_tuning(crate::AudioBackend::AlsaUsb);
+        assert!(armed.enabled);
+        assert_eq!(
+            armed.noise_level(),
+            Some(prelude_media::NoiseSuppressionLevel::High)
+        );
+        assert!(!armed.high_pass_filter);
+        assert!(armed.gain_control);
+
+        let noise_off = RuntimeSettings {
+            noise_suppression: false,
+            ..tuned
+        };
+        assert!(
+            noise_off
+                .echo_tuning(crate::AudioBackend::AlsaUsb)
+                .noise_level()
+                .is_none()
+        );
+        for audio in [
+            crate::AudioBackend::None,
+            crate::AudioBackend::BuiltInSuperbird,
+        ] {
+            assert!(tuned.echo_tuning(audio).noise_level().is_none());
+        }
+        let phone_audio = RuntimeSettings {
+            phone_audio: true,
+            ..tuned
+        };
+        assert!(
+            phone_audio
+                .echo_tuning(crate::AudioBackend::AlsaUsb)
+                .noise_level()
+                .is_none()
+        );
     }
 
     #[test]

@@ -2914,8 +2914,14 @@ impl MicrophoneGstPipeline {
                 })?,
             )?;
             let aec = make("webrtcdsp", "microphone-aec")?;
+            let tuning = echo_reference::tuning();
             set_checked(&aec, "probe", reference.probe_name.as_str())?;
-            set_checked(&aec, "gain-control", false)?;
+            set_checked(&aec, "noise-suppression", tuning.noise_suppression)?;
+            if let Some(level) = tuning.noise_level() {
+                set_enum_checked(&aec, "noise-suppression-level", level.nick())?;
+            }
+            set_checked(&aec, "high-pass-filter", tuning.high_pass_filter)?;
+            set_checked(&aec, "gain-control", tuning.gain_control)?;
             let post = make("audioconvert", "microphone-aec-converter")?;
             elements.extend([aec_caps, aec, post]);
         }
@@ -4318,11 +4324,14 @@ mod tests {
         struct DisableEcho;
         impl Drop for DisableEcho {
             fn drop(&mut self) {
-                echo_reference::set_enabled(false);
+                echo_reference::set_tuning(crate::EchoTuning::DEFAULT);
             }
         }
         let _disable_echo = DisableEcho;
-        echo_reference::set_enabled(true);
+        echo_reference::set_tuning(crate::EchoTuning {
+            enabled: true,
+            ..crate::EchoTuning::DEFAULT
+        });
         let format = AudioFormatId::new(0x8000);
         let plan = AudioMixerPlan::new(&[(AudioStreamId::Main, format)]).expect("mixer plan");
         let pipeline = AudioGstPipeline::start(plan, "null").expect("echo playback");
@@ -4340,7 +4349,7 @@ mod tests {
             name
         );
         drop(pipeline);
-        echo_reference::set_enabled(false);
+        echo_reference::set_tuning(crate::EchoTuning::DEFAULT);
         let plan = AudioMixerPlan::new(&[(AudioStreamId::Main, format)]).expect("mixer plan");
         let pipeline = AudioGstPipeline::start(plan, "null").expect("playback without echo");
         assert!(pipeline.echo_probe_name.is_none());

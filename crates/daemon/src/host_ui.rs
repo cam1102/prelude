@@ -246,6 +246,7 @@ enum Page {
     Presets,
     Wifi,
     Equalizer,
+    EchoTuning,
     Support,
 }
 
@@ -259,6 +260,11 @@ enum Item {
     CarPlayDock,
     PhoneAudio,
     CallEcho,
+    EchoTuning,
+    EchoNoise,
+    EchoNoiseLevel,
+    EchoHighPass,
+    EchoGain,
     Equalizer,
     Presets,
     Preset(usize),
@@ -285,6 +291,7 @@ impl Item {
                 | Self::WifiBand
                 | Self::WifiChannel
                 | Self::WifiWidth
+                | Self::EchoNoiseLevel
         )
     }
 
@@ -458,6 +465,7 @@ struct SettingsUi<D> {
     staged_dpi_customized: bool,
     staged_phone_audio: bool,
     staged_echo_cancellation: bool,
+    staged_echo: prelude_media::EchoTuning,
     staged_dock: CarPlayDock,
     presets: PresetBindings,
     staged_presets: [PresetAction; PRESET_COUNT],
@@ -515,6 +523,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
             staged_dpi_customized: settings.dpi_customized,
             staged_phone_audio: settings.phone_audio,
             staged_echo_cancellation: settings.echo_cancellation,
+            staged_echo: settings.echo_knobs(),
             staged_dock: settings.carplay_dock,
             presets,
             staged_presets: settings.presets,
@@ -639,6 +648,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
             || self.staged_dpi_customized != self.settings.dpi_customized
             || self.staged_phone_audio != self.settings.phone_audio
             || self.staged_echo_cancellation != self.settings.echo_cancellation
+            || self.staged_echo != self.settings.echo_knobs()
             || self.staged_dock != self.settings.carplay_dock
             || self.staged_presets != self.settings.presets
             || self.staged_radio != self.settings.wifi_radio()
@@ -685,6 +695,14 @@ impl<D: OverlaySurface> SettingsUi<D> {
                 Section::plain(vec![Item::WifiBand, Item::WifiChannel, Item::WifiWidth])
                     .footer("Wi-Fi restarts after settings close"),
             ],
+            Page::EchoTuning => {
+                let mut items = vec![Item::EchoNoise];
+                if self.staged_echo.noise_suppression {
+                    items.push(Item::EchoNoiseLevel);
+                }
+                items.extend([Item::EchoHighPass, Item::EchoGain]);
+                vec![Section::plain(items).footer("Takes effect on the next call")]
+            }
             Page::Wifi | Page::Equalizer | Page::Support => Vec::new(),
         }
     }
@@ -693,6 +711,9 @@ impl<D: OverlaySurface> SettingsUi<D> {
         let mut items = vec![Item::PhoneAudio];
         if self.usb_dac_audio && !self.staged_phone_audio {
             items.push(Item::CallEcho);
+            if self.staged_echo_cancellation {
+                items.push(Item::EchoTuning);
+            }
         }
         items.push(Item::Equalizer);
         items
@@ -746,6 +767,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
         self.staged_dpi_customized = self.settings.dpi_customized;
         self.staged_phone_audio = self.settings.phone_audio;
         self.staged_echo_cancellation = self.settings.echo_cancellation;
+        self.staged_echo = self.settings.echo_knobs();
         self.staged_dock = self.settings.carplay_dock;
         self.staged_presets = self.settings.presets;
         self.staged_radio = self.settings.wifi_radio();
@@ -769,6 +791,10 @@ impl<D: OverlaySurface> SettingsUi<D> {
         next.dpi_customized = self.staged_dpi_customized;
         next.phone_audio = self.staged_phone_audio;
         next.echo_cancellation = self.staged_echo_cancellation;
+        next.noise_suppression = self.staged_echo.noise_suppression;
+        next.noise_suppression_level = self.staged_echo.noise_suppression_level;
+        next.high_pass_filter = self.staged_echo.high_pass_filter;
+        next.gain_control = self.staged_echo.gain_control;
         next.carplay_dock = self.staged_dock;
         next.presets = self.staged_presets;
         if let Some((channel, width)) = self.staged_radio {
@@ -789,6 +815,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
         let radio_changed = next.wifi_radio() != self.settings.wifi_radio();
         self.presets.set(next.presets);
         self.settings = next;
+        self.publish_echo();
         self.menu_open = false;
         self.leave_subpage();
         if let Err(error) = self.display.clear_overlay() {
@@ -958,6 +985,19 @@ impl<D: OverlaySurface> SettingsUi<D> {
             Item::Density => self.enter(Page::Density),
             Item::PhoneAudio => self.toggle_phone_audio(),
             Item::CallEcho => self.toggle_echo_cancellation(),
+            Item::EchoTuning => self.enter(Page::EchoTuning),
+            Item::EchoNoise => {
+                self.staged_echo.noise_suppression = !self.staged_echo.noise_suppression;
+                self.redraw_staged();
+            }
+            Item::EchoHighPass => {
+                self.staged_echo.high_pass_filter = !self.staged_echo.high_pass_filter;
+                self.redraw_staged();
+            }
+            Item::EchoGain => {
+                self.staged_echo.gain_control = !self.staged_echo.gain_control;
+                self.redraw_staged();
+            }
             Item::Equalizer => self.enter(Page::Equalizer),
             Item::Presets => self.enter(Page::Presets),
             Item::PresetsReset => self.reset_presets(),
@@ -972,7 +1012,8 @@ impl<D: OverlaySurface> SettingsUi<D> {
             | Item::Preset(_)
             | Item::WifiBand
             | Item::WifiChannel
-            | Item::WifiWidth => self.adjust(item, 1, true),
+            | Item::WifiWidth
+            | Item::EchoNoiseLevel => self.adjust(item, 1, true),
         }
     }
 
@@ -1001,6 +1042,15 @@ impl<D: OverlaySurface> SettingsUi<D> {
                     self.error_message = None;
                     self.redraw();
                 }
+            }
+            Item::EchoNoiseLevel => {
+                self.staged_echo.noise_suppression_level = step_option(
+                    &prelude_media::NoiseSuppressionLevel::ALL,
+                    self.staged_echo.noise_suppression_level,
+                    delta,
+                    wrap,
+                );
+                self.redraw_staged();
             }
             _ => {}
         }
@@ -1190,8 +1240,21 @@ impl<D: OverlaySurface> SettingsUi<D> {
 
     fn toggle_echo_cancellation(&mut self) {
         self.staged_echo_cancellation = !self.staged_echo_cancellation;
+        self.redraw_staged();
+    }
+
+    fn redraw_staged(&mut self) {
         self.error_message = None;
         self.redraw();
+    }
+
+    fn publish_echo(&self) {
+        let audio = if self.usb_dac_audio {
+            crate::AudioBackend::AlsaUsb
+        } else {
+            crate::AudioBackend::None
+        };
+        prelude_media::set_echo_cancellation(self.settings.echo_tuning(audio));
     }
 
     fn apply_immediate_setting(&mut self, next: RuntimeSettings, brightness: bool) {
@@ -1287,6 +1350,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
             Page::Presets => "Preset buttons",
             Page::Wifi => "Wi-Fi",
             Page::Equalizer => "Equalizer",
+            Page::EchoTuning => "Echo tuning",
             Page::Support => "Support Prelude",
         }
     }
@@ -1703,6 +1767,26 @@ impl<D: OverlaySurface> SettingsUi<D> {
                 Trailing::Switch(self.staged_echo_cancellation),
             )
             .detail("Other side won't hear itself"),
+            Item::EchoTuning => {
+                RowView::new("Echo tuning", Trailing::Link(String::new(), SECONDARY))
+            }
+            Item::EchoNoise => RowView::new(
+                "Noise suppression",
+                Trailing::Switch(self.staged_echo.noise_suppression),
+            ),
+            Item::EchoNoiseLevel => RowView::new(
+                "Noise level",
+                self.option_trailing(item, self.staged_echo.noise_suppression_level.label()),
+            ),
+            Item::EchoHighPass => RowView::new(
+                "High-pass filter",
+                Trailing::Switch(self.staged_echo.high_pass_filter),
+            ),
+            Item::EchoGain => RowView::new(
+                "Gain control",
+                Trailing::Switch(self.staged_echo.gain_control),
+            )
+            .detail("Advanced"),
             Item::Equalizer => RowView::new(
                 "Equalizer",
                 Trailing::Link(on_off(self.equalizer_ui.settings.enabled), SECONDARY),
@@ -2483,12 +2567,85 @@ mod tests {
     }
 
     fn call_echo_visible(harness: &Harness) -> bool {
-        harness
-            .ui
-            .layout()
-            .rows
-            .iter()
-            .any(|row| row.item == Item::CallEcho)
+        row_visible(harness, Item::CallEcho)
+    }
+
+    fn row_visible(harness: &Harness, item: Item) -> bool {
+        harness.ui.layout().rows.iter().any(|row| row.item == item)
+    }
+
+    #[test]
+    fn echo_tuning_appears_with_call_echo_and_stages_knobs_until_close() {
+        let mut harness = Harness::new();
+        assert!(!row_visible(&harness, Item::EchoTuning));
+        harness.focus(Item::CallEcho);
+        harness.press(KnobInputButton::Select);
+        assert!(row_visible(&harness, Item::EchoTuning));
+        assert!(!harness.ui.settings.echo_cancellation);
+        harness.focus(Item::EchoTuning);
+        harness.press(KnobInputButton::Select);
+        assert_eq!(harness.ui.page, Page::EchoTuning);
+        assert!(row_visible(&harness, Item::EchoNoiseLevel));
+        harness.focus(Item::EchoNoise);
+        harness.press(KnobInputButton::Select);
+        assert!(!row_visible(&harness, Item::EchoNoiseLevel));
+        harness.press(KnobInputButton::Select);
+        harness.focus(Item::EchoNoiseLevel);
+        harness.press(KnobInputButton::Select);
+        harness.turn(2);
+        assert_eq!(
+            harness.ui.staged_echo.noise_suppression_level,
+            prelude_media::NoiseSuppressionLevel::VeryHigh
+        );
+        harness.press(KnobInputButton::Back);
+        harness.focus(Item::EchoHighPass);
+        harness.press(KnobInputButton::Select);
+        harness.focus(Item::EchoGain);
+        harness.press(KnobInputButton::Select);
+        harness.press(KnobInputButton::Back);
+        assert_eq!(harness.ui.page, Page::Settings);
+        assert!(harness.ui.settings.high_pass_filter);
+        assert!(!harness.ui.settings.gain_control);
+        harness.press(KnobInputButton::Back);
+        assert!(!harness.ui.settings.high_pass_filter);
+        assert!(harness.ui.settings.gain_control);
+        assert_eq!(
+            harness.ui.settings.noise_suppression_level,
+            prelude_media::NoiseSuppressionLevel::VeryHigh
+        );
+        assert!(harness.ui.settings.noise_suppression);
+        assert!(harness.ui.settings.echo_cancellation);
+    }
+
+    #[test]
+    fn echo_knob_edits_do_not_restart_projection() {
+        let mut harness = Harness::new();
+        harness.ui.settings.echo_cancellation = true;
+        harness.ui.staged_echo_cancellation = true;
+        harness.ui.enter(Page::EchoTuning);
+        harness.focus(Item::EchoHighPass);
+        harness.press(KnobInputButton::Select);
+        harness.press(KnobInputButton::Back);
+        harness.press(KnobInputButton::Back);
+        assert!(!harness.ui.menu_open);
+        assert!(!harness.ui.settings.high_pass_filter);
+        assert!(harness.ui.settings.echo_cancellation);
+        assert!(harness.events.try_iter().next().is_none());
+    }
+
+    #[test]
+    fn echo_tuning_hides_with_the_call_echo_row() {
+        let mut harness = Harness::new();
+        harness.focus(Item::CallEcho);
+        harness.press(KnobInputButton::Select);
+        assert!(row_visible(&harness, Item::EchoTuning));
+        harness.focus(Item::PhoneAudio);
+        harness.press(KnobInputButton::Select);
+        assert!(!row_visible(&harness, Item::CallEcho));
+        assert!(!row_visible(&harness, Item::EchoTuning));
+        harness.ui.usb_dac_audio = false;
+        harness.ui.staged_phone_audio = false;
+        assert!(!row_visible(&harness, Item::EchoTuning));
     }
 
     #[test]
@@ -2728,7 +2885,9 @@ mod tests {
         for character in
             "Settings Wireless Display Audio Phones Wi-Fi Auto brightness night mode Screen \
              density Phone audio Keep sound on your phone Cancel call echo Other side won't hear \
-             itself Equalizer On Off None saved Ch 2.4 5 GHz \
+             itself Echo tuning Noise suppression level High-pass filter Gain control \
+             Low Moderate High Very high Advanced Takes effect on the next call \
+             Equalizer On Off None saved Ch 2.4 5 GHz \
              Applies when settings close Unable to save apply equalizer Connected Connecting… \
              CarPlay Android Auto · Connect Disconnect Forget this phone Press again to forget \
              Density dpi Smaller Larger Reset to default CarPlay and Android Auto restart after \
@@ -2768,6 +2927,16 @@ mod tests {
             }
         };
         capture(&harness, "settings");
+        harness.focus(Item::CallEcho);
+        harness.press(KnobInputButton::Select);
+        harness.focus(Item::EchoTuning);
+        harness.press(KnobInputButton::Select);
+        capture(&harness, "echo-tuning");
+        harness.focus(Item::EchoNoiseLevel);
+        harness.press(KnobInputButton::Select);
+        capture(&harness, "echo-tuning-level");
+        harness.press(KnobInputButton::Back);
+        harness.press(KnobInputButton::Back);
         harness.focus(Item::Density);
         capture(&harness, "settings-scrolled");
         harness.focus(Item::PhoneAudio);
