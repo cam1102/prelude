@@ -23,6 +23,7 @@ use crate::{
     VideoFrameDisposition, VideoIngressBuffer, VideoPipelinePlan,
     backend_plan::AudioGainRamp,
     backpressure::{DecodeStallWatchdog, StartupSampleDisposition, VideoStartupRenderGate},
+    echo_reference::{self, EchoReference},
     pipeline_state::{PipelineLifecycleState, require_settled_state, video_start_is_settled},
     presentation_timing::{VideoPresentationClock, VideoPresentationSchedule},
     resolve_builtin_microphone, resolve_usb_dac, revalidate_usb_dac, validate_video_decoder_target,
@@ -1686,6 +1687,7 @@ impl Drop for LinuxAudioBackend {
 
 struct AudioGstPipeline {
     equalizer: Option<OutputEqualizer>,
+    echo_probe_name: Option<String>,
     pipeline: gst::Pipeline,
     sink: gst::Element,
     test_tone: gst::Element,
@@ -2144,9 +2146,18 @@ impl AudioGstPipeline {
         let mix_caps = make("capsfilter", "float-mixer-output")?;
         set_checked(&mix_caps, "caps", floating_mix_caps(&plan)?)?;
         let equalizer = OutputEqualizer::create(equalizer_control)?;
+        let echo_probe = if echo_reference::enabled() && echo_reference::available() {
+            let name = echo_reference::next_probe_name();
+            Some((make("webrtcechoprobe", &name)?, name))
+        } else {
+            None
+        };
         let mut output_elements = vec![&mixer, &mix_caps];
         if let Some(dsp) = equalizer.as_ref() {
             output_elements.extend(dsp.elements());
+        }
+        if let Some((probe, _)) = echo_probe.as_ref() {
+            output_elements.push(probe);
         }
         output_elements.extend([&output_convert, &output_caps, &sink]);
         pipeline
@@ -2261,8 +2272,23 @@ impl AudioGstPipeline {
             let _ = stop_pipeline(&pipeline, "audio mixer");
             return Err(error);
         }
+        let echo_probe_name = if let (Some((_, name)), Some(base_time)) =
+            (echo_probe.as_ref(), pipeline.base_time())
+        {
+            if let Err(error) = echo_reference::publish(EchoReference {
+                probe_name: name.clone(),
+                base_time,
+            }) {
+                let _ = stop_pipeline(&pipeline, "audio mixer");
+                return Err(error);
+            }
+            Some(name.clone())
+        } else {
+            None
+        };
         Ok(Self {
             equalizer,
+            echo_probe_name,
             pipeline,
             sink,
             test_tone,
@@ -2461,7 +2487,16 @@ impl AudioGstPipeline {
     }
 
     fn stop(&mut self) -> Result<()> {
-        stop_pipeline(&self.pipeline, "audio mixer")
+        let retracted = self.retract_echo_probe();
+        let stopped = stop_pipeline(&self.pipeline, "audio mixer");
+        retracted.and(stopped)
+    }
+
+    fn retract_echo_probe(&mut self) -> Result<()> {
+        if let Some(name) = self.echo_probe_name.take() {
+            echo_reference::retract(&name)?;
+        }
+        Ok(())
     }
 }
 
@@ -2479,6 +2514,7 @@ fn base_sink_stats(sink: &gst::Element) -> Option<AudioSinkStats> {
 
 impl Drop for AudioGstPipeline {
     fn drop(&mut self) {
+        let _ = self.retract_echo_probe();
         let _ = stop_pipeline(&self.pipeline, "audio mixer");
     }
 }
@@ -2697,7 +2733,7 @@ fn microphone_worker(
             .map_err(|error| Error::Backend(format!("cannot initialize GStreamer: {error}")))?;
         MicrophoneGstPipeline::start(&packetizer, &input)
     })();
-    let active = match initialized {
+    let mut active = match initialized {
         Ok(active) => {
             if startup.send(Ok(())).is_err() {
                 active.stop()?;
@@ -2722,13 +2758,28 @@ fn microphone_worker(
                     return Err(error);
                 }
             }
+            if let Err(error) = active.realign_echo_reference(&packetizer, &input) {
+                report_failure(&errors, "microphone", &error);
+                packetizer.teardown();
+                return Err(error);
+            }
             next_identity_check = Instant::now() + Duration::from_secs(1);
         }
         if let Err(error) = active.check_bus() {
-            report_failure(&errors, "microphone", &error);
-            active.stop()?;
-            packetizer.teardown();
-            return Err(error);
+            match active.realign_echo_reference(&packetizer, &input) {
+                Ok(true) => {}
+                Ok(false) => {
+                    report_failure(&errors, "microphone", &error);
+                    active.stop()?;
+                    packetizer.teardown();
+                    return Err(error);
+                }
+                Err(realign_error) => {
+                    report_failure(&errors, "microphone", &realign_error);
+                    packetizer.teardown();
+                    return Err(realign_error);
+                }
+            }
         }
         let Some(sample) = active
             .sink
@@ -2775,13 +2826,39 @@ fn microphone_worker(
 struct MicrophoneGstPipeline {
     pipeline: gst::Pipeline,
     sink: gst_app::AppSink,
+    echo_reference: Option<EchoReference>,
 }
 
 impl MicrophoneGstPipeline {
     fn start(packetizer: &MicrophonePacketizer, input: &ResolvedMicrophoneInput) -> Result<Self> {
         let plan = crate::MicrophonePipelinePlan::new(packetizer.config())?;
+        let reference = echo_reference::current_for_capture()?;
+        match Self::build(packetizer, input, &plan, reference.as_ref()) {
+            Ok(pipeline) => Ok(pipeline),
+            Err(_) if reference.is_some() => {
+                let mut pipeline = Self::build(packetizer, input, &plan, None)?;
+                pipeline.echo_reference = reference;
+                Ok(pipeline)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn build(
+        packetizer: &MicrophonePacketizer,
+        input: &ResolvedMicrophoneInput,
+        plan: &crate::MicrophonePipelinePlan,
+        reference: Option<&EchoReference>,
+    ) -> Result<Self> {
         let codec = packetizer.config().codec;
         let pipeline = gst::Pipeline::new();
+        if let Some(reference) = reference {
+            // ponytail: one clock and base time across two pipelines. If Cayman logs
+            // continuous webrtcdsp skip/silence, switch to the Rust AEC crate.
+            pipeline.use_clock(Some(&gst::SystemClock::obtain()));
+            pipeline.set_start_time(gst::ClockTime::NONE);
+            pipeline.set_base_time(reference.base_time);
+        }
         let source = make("alsasrc", "built-in-microphone")?;
         set_checked(&source, "device", input.device())?;
         let source_caps = make("capsfilter", "microphone-source-caps")?;
@@ -2794,7 +2871,29 @@ impl MicrophoneGstPipeline {
         let resample = make("audioresample", "microphone-resampler")?;
         let output_caps = make("capsfilter", "microphone-packetizer-caps")?;
         set_checked(&output_caps, "caps", caps(&plan.packetizer_input_caps)?)?;
-        let mut elements = vec![source, source_caps, queue, convert, resample, output_caps];
+        let mut elements = vec![source, source_caps, queue, convert];
+        if let Some(reference) = reference {
+            let aec_caps = make("capsfilter", "microphone-aec-caps")?;
+            set_checked(
+                &aec_caps,
+                "caps",
+                caps(&CapsPlan {
+                    media_type: "audio/x-raw",
+                    fields: vec![
+                        ("format", CapsValue::String("S16LE".to_owned())),
+                        ("layout", CapsValue::String("interleaved".to_owned())),
+                        ("rate", CapsValue::Signed(48_000)),
+                        ("channels", CapsValue::Signed(1)),
+                    ],
+                })?,
+            )?;
+            let aec = make("webrtcdsp", "microphone-aec")?;
+            set_checked(&aec, "probe", reference.probe_name.as_str())?;
+            set_checked(&aec, "gain-control", false)?;
+            let post = make("audioconvert", "microphone-aec-converter")?;
+            elements.extend([aec_caps, aec, post]);
+        }
+        elements.extend([resample, output_caps]);
         if codec == MicrophoneCodec::Opus {
             let encoder = make("opusenc", "microphone-opus-encoder")?;
             set_enum_checked(&encoder, "audio-type", "voice")?;
@@ -2833,7 +2932,28 @@ impl MicrophoneGstPipeline {
             let _ = stop_pipeline(&pipeline, "microphone pipeline");
             return Err(error);
         }
-        Ok(Self { pipeline, sink })
+        Ok(Self {
+            pipeline,
+            sink,
+            echo_reference: reference.cloned(),
+        })
+    }
+
+    fn echo_reference_changed(&self) -> Result<bool> {
+        Ok(echo_reference::current_for_capture()? != self.echo_reference)
+    }
+
+    fn realign_echo_reference(
+        &mut self,
+        packetizer: &MicrophonePacketizer,
+        input: &ResolvedMicrophoneInput,
+    ) -> Result<bool> {
+        if !self.echo_reference_changed()? {
+            return Ok(false);
+        }
+        self.stop()?;
+        *self = Self::start(packetizer, input)?;
+        Ok(true)
     }
 
     fn check_bus(&self) -> Result<()> {

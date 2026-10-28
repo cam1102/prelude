@@ -109,6 +109,7 @@ pub struct HostUi {
 }
 
 impl HostUi {
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         display: LinuxDisplayHandle,
         state_dir: PathBuf,
@@ -117,6 +118,7 @@ impl HostUi {
         presets: PresetBindings,
         ambient_light: Option<AmbientLightControl>,
         phones: Option<WirelessPhoneDirectory>,
+        usb_dac_audio: bool,
     ) -> Result<Self, String> {
         let (events_tx, events) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
@@ -136,6 +138,7 @@ impl HostUi {
                     phones,
                     events_tx,
                     worker_wake,
+                    usb_dac_audio,
                 );
                 run_host_ui(ui, &worker_stop);
             })
@@ -255,6 +258,7 @@ enum Item {
     Density,
     CarPlayDock,
     PhoneAudio,
+    CallEcho,
     Equalizer,
     Presets,
     Preset(usize),
@@ -453,6 +457,7 @@ struct SettingsUi<D> {
     staged_dpi: u32,
     staged_dpi_customized: bool,
     staged_phone_audio: bool,
+    staged_echo_cancellation: bool,
     staged_dock: CarPlayDock,
     presets: PresetBindings,
     staged_presets: [PresetAction; PRESET_COUNT],
@@ -469,6 +474,7 @@ struct SettingsUi<D> {
     ambient_light: Option<AmbientLightControl>,
     directory: Option<WirelessPhoneDirectory>,
     wireless: bool,
+    usb_dac_audio: bool,
     version: String,
     phones: Vec<KnownPhone>,
     active_phone: Option<String>,
@@ -493,6 +499,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
         directory: Option<WirelessPhoneDirectory>,
         events: Sender<HostUiEvent>,
         wake: Arc<Notify>,
+        usb_dac_audio: bool,
     ) -> Self {
         if let Some(control) = ambient_light.as_ref() {
             control.set_automatic_brightness(settings.auto_brightness);
@@ -507,6 +514,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
             staged_dpi: settings.reported_dpi,
             staged_dpi_customized: settings.dpi_customized,
             staged_phone_audio: settings.phone_audio,
+            staged_echo_cancellation: settings.echo_cancellation,
             staged_dock: settings.carplay_dock,
             presets,
             staged_presets: settings.presets,
@@ -522,6 +530,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
             error_message: None,
             ambient_light,
             wireless: directory.is_some(),
+            usb_dac_audio,
             directory,
             version: system_version(),
             phones: Vec::new(),
@@ -629,6 +638,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
         self.staged_dpi != self.settings.reported_dpi
             || self.staged_dpi_customized != self.settings.dpi_customized
             || self.staged_phone_audio != self.settings.phone_audio
+            || self.staged_echo_cancellation != self.settings.echo_cancellation
             || self.staged_dock != self.settings.carplay_dock
             || self.staged_presets != self.settings.presets
             || self.staged_radio != self.settings.wifi_radio()
@@ -647,7 +657,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
                         Item::CarPlayDock,
                     ],
                 ),
-                Section::titled("Audio", vec![Item::PhoneAudio, Item::Equalizer]),
+                Section::titled("Audio", self.audio_items()),
                 Section::titled("Controls", vec![Item::Presets]),
                 Section::titled("Advanced", vec![Item::Wifi, Item::Support, Item::Version]),
             ],
@@ -677,6 +687,15 @@ impl<D: OverlaySurface> SettingsUi<D> {
             ],
             Page::Wifi | Page::Equalizer | Page::Support => Vec::new(),
         }
+    }
+
+    fn audio_items(&self) -> Vec<Item> {
+        let mut items = vec![Item::PhoneAudio];
+        if self.usb_dac_audio && !self.staged_phone_audio {
+            items.push(Item::CallEcho);
+        }
+        items.push(Item::Equalizer);
+        items
     }
 
     fn layout(&self) -> Layout {
@@ -726,6 +745,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
         self.staged_dpi = self.settings.reported_dpi;
         self.staged_dpi_customized = self.settings.dpi_customized;
         self.staged_phone_audio = self.settings.phone_audio;
+        self.staged_echo_cancellation = self.settings.echo_cancellation;
         self.staged_dock = self.settings.carplay_dock;
         self.staged_presets = self.settings.presets;
         self.staged_radio = self.settings.wifi_radio();
@@ -748,6 +768,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
         next.reported_dpi = self.staged_dpi;
         next.dpi_customized = self.staged_dpi_customized;
         next.phone_audio = self.staged_phone_audio;
+        next.echo_cancellation = self.staged_echo_cancellation;
         next.carplay_dock = self.staged_dock;
         next.presets = self.staged_presets;
         if let Some((channel, width)) = self.staged_radio {
@@ -763,6 +784,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
         let restart_required = next.reported_dpi != self.settings.reported_dpi
             || next.dpi_customized != self.settings.dpi_customized
             || next.phone_audio != self.settings.phone_audio
+            || next.echo_cancellation != self.settings.echo_cancellation
             || next.carplay_dock != self.settings.carplay_dock;
         let radio_changed = next.wifi_radio() != self.settings.wifi_radio();
         self.presets.set(next.presets);
@@ -935,6 +957,7 @@ impl<D: OverlaySurface> SettingsUi<D> {
             Item::AutoNightMode => self.toggle_auto_night_mode(),
             Item::Density => self.enter(Page::Density),
             Item::PhoneAudio => self.toggle_phone_audio(),
+            Item::CallEcho => self.toggle_echo_cancellation(),
             Item::Equalizer => self.enter(Page::Equalizer),
             Item::Presets => self.enter(Page::Presets),
             Item::PresetsReset => self.reset_presets(),
@@ -1161,6 +1184,12 @@ impl<D: OverlaySurface> SettingsUi<D> {
 
     fn toggle_phone_audio(&mut self) {
         self.staged_phone_audio = !self.staged_phone_audio;
+        self.error_message = None;
+        self.redraw();
+    }
+
+    fn toggle_echo_cancellation(&mut self) {
+        self.staged_echo_cancellation = !self.staged_echo_cancellation;
         self.error_message = None;
         self.redraw();
     }
@@ -1669,6 +1698,11 @@ impl<D: OverlaySurface> SettingsUi<D> {
                 RowView::new("Phone audio", Trailing::Switch(self.staged_phone_audio))
                     .detail("Keep sound on your phone")
             }
+            Item::CallEcho => RowView::new(
+                "Cancel call echo",
+                Trailing::Switch(self.staged_echo_cancellation),
+            )
+            .detail("Other side won't hear itself"),
             Item::Equalizer => RowView::new(
                 "Equalizer",
                 Trailing::Link(on_off(self.equalizer_ui.settings.enabled), SECONDARY),
@@ -2174,6 +2208,7 @@ mod tests {
                 None,
                 sender,
                 Arc::new(Notify::new()),
+                true,
             );
             ui.open();
             Self {
@@ -2413,6 +2448,50 @@ mod tests {
     }
 
     #[test]
+    fn call_echo_cancellation_stays_off_until_it_is_staged() {
+        let mut harness = Harness::new();
+        assert!(!harness.ui.settings.echo_cancellation);
+        harness.focus(Item::CallEcho);
+        harness.press(KnobInputButton::Select);
+        assert!(harness.ui.staged_echo_cancellation);
+        assert!(!harness.ui.settings.echo_cancellation);
+        harness.press(KnobInputButton::Back);
+        assert!(harness.ui.settings.echo_cancellation);
+        assert!(call_echo_visible(&harness));
+        let events: Vec<_> = harness.events.try_iter().collect();
+        assert!(matches!(
+            events.as_slice(),
+            [HostUiEvent::SettingsCommitted(SettingsCommitted {
+                restart_required: true,
+                radio_changed: false,
+                ..
+            })]
+        ));
+    }
+
+    #[test]
+    fn call_echo_row_requires_the_usb_dac_and_phone_audio_off() {
+        let mut harness = Harness::new();
+        assert!(call_echo_visible(&harness));
+        harness.focus(Item::PhoneAudio);
+        harness.press(KnobInputButton::Select);
+        assert!(!call_echo_visible(&harness));
+        harness.press(KnobInputButton::Select);
+        assert!(call_echo_visible(&harness));
+        harness.ui.usb_dac_audio = false;
+        assert!(!call_echo_visible(&harness));
+    }
+
+    fn call_echo_visible(harness: &Harness) -> bool {
+        harness
+            .ui
+            .layout()
+            .rows
+            .iter()
+            .any(|row| row.item == Item::CallEcho)
+    }
+
+    #[test]
     fn carplay_dock_is_picked_in_place_and_restarts_projection_on_close() {
         let mut harness = Harness::new();
         harness.focus(Item::CarPlayDock);
@@ -2648,7 +2727,8 @@ mod tests {
     fn built_in_font_covers_settings_labels() {
         for character in
             "Settings Wireless Display Audio Phones Wi-Fi Auto brightness night mode Screen \
-             density Phone audio Keep sound on your phone Equalizer On Off None saved Ch 2.4 5 GHz \
+             density Phone audio Keep sound on your phone Cancel call echo Other side won't hear \
+             itself Equalizer On Off None saved Ch 2.4 5 GHz \
              Applies when settings close Unable to save apply equalizer Connected Connecting… \
              CarPlay Android Auto · Connect Disconnect Forget this phone Press again to forget \
              Density dpi Smaller Larger Reset to default CarPlay and Android Auto restart after \

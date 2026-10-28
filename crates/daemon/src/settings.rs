@@ -44,6 +44,7 @@ pub struct RuntimeSettings {
     pub original_dpi: u32,
     pub dpi_customized: bool,
     pub phone_audio: bool,
+    pub echo_cancellation: bool,
     pub carplay_dock: CarPlayDock,
     pub presets: [PresetAction; PRESET_COUNT],
     pub equalizer: prelude_media::EqualizerSettings,
@@ -60,6 +61,7 @@ impl Default for RuntimeSettings {
             original_dpi: prelude_android_auto_protocol::DEFAULT_VIDEO_DENSITY_DPI,
             dpi_customized: false,
             phone_audio: false,
+            echo_cancellation: false,
             carplay_dock: CarPlayDock::Left,
             presets: PresetAction::DEFAULTS,
             equalizer: Default::default(),
@@ -83,6 +85,7 @@ impl RuntimeSettings {
             dpi_customized: false,
             phone_audio: config.airplay.disable_audio_output
                 && config.android_auto.disable_audio_output,
+            echo_cancellation: false,
             carplay_dock: config.airplay.dock,
             presets: config.platform.presets.actions(),
             equalizer: config.media.equalizer.settings(),
@@ -149,6 +152,8 @@ impl RuntimeSettings {
         config.android_auto.ui_density_dpi = settings.reported_dpi;
         config.airplay.disable_audio_output = settings.phone_audio;
         config.android_auto.disable_audio_output = settings.phone_audio;
+        #[cfg(all(target_os = "linux", feature = "linux-media"))]
+        prelude_media::set_echo_cancellation(settings.use_echo_cancellation(config.media.audio));
         config.airplay.dock = settings.carplay_dock;
         config.platform.presets.set(settings.presets);
         if let Some(channel) = settings.wifi_channel {
@@ -166,6 +171,10 @@ impl RuntimeSettings {
                 pixels_to_millimeters(480, settings.reported_dpi);
         }
         Ok(())
+    }
+
+    fn use_echo_cancellation(&self, audio: crate::AudioBackend) -> bool {
+        self.echo_cancellation && !self.phone_audio && audio == crate::AudioBackend::AlsaUsb
     }
 
     pub fn load(state_dir: &Path, defaults: Self) -> Result<Self, SettingsError> {
@@ -246,6 +255,7 @@ mod tests {
             original_dpi: 170,
             dpi_customized: true,
             phone_audio: true,
+            echo_cancellation: true,
             carplay_dock: CarPlayDock::Bottom,
             presets: [
                 PresetAction::VoiceAssistant,
@@ -472,6 +482,25 @@ mod tests {
     fn settings_without_phone_audio_keep_the_usb_dac() {
         let settings: RuntimeSettings = toml::from_str("reported_dpi = 200\n").expect("decode");
         assert!(!settings.phone_audio);
+        assert!(!settings.echo_cancellation);
+    }
+
+    #[test]
+    fn echo_cancellation_runs_only_for_dac_calls_with_phone_audio_off() {
+        let on = RuntimeSettings {
+            echo_cancellation: true,
+            ..RuntimeSettings::default()
+        };
+        assert!(on.use_echo_cancellation(crate::AudioBackend::AlsaUsb));
+        assert!(!on.use_echo_cancellation(crate::AudioBackend::None));
+        assert!(!on.use_echo_cancellation(crate::AudioBackend::BuiltInSuperbird));
+        let phone_audio = RuntimeSettings {
+            echo_cancellation: true,
+            phone_audio: true,
+            ..RuntimeSettings::default()
+        };
+        assert!(!phone_audio.use_echo_cancellation(crate::AudioBackend::AlsaUsb));
+        assert!(!RuntimeSettings::default().use_echo_cancellation(crate::AudioBackend::AlsaUsb));
     }
 
     #[test]

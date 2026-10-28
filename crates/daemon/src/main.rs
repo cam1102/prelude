@@ -187,6 +187,7 @@ async fn main() -> Result<()> {
             daemon.config().platform.presets.clone(),
             ambient_control.clone(),
             wireless.as_ref().map(WirelessService::directory),
+            daemon.config().media.audio == preluded::AudioBackend::AlsaUsb,
         )
     });
     #[cfg(all(target_os = "linux", feature = "linux-media"))]

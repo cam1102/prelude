@@ -41,6 +41,7 @@ RDEPENDS:${PN} = " \
     gstreamer1.0-plugins-good-rtpmanager \
     gstreamer1.0-plugins-good-video4linux2 \
     gstreamer1.0-plugins-bad-faad \
+    gstreamer1.0-plugins-bad-webrtcdsp \
     gstreamer1.0-plugins-bad-videoparsersbad \
     \
     kernel-module-snd-usb-audio \
