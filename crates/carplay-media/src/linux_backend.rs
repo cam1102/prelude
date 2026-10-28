@@ -2122,6 +2122,22 @@ impl AudioGstPipeline {
         alsa_device: &str,
         equalizer_control: crate::EqualizerControl,
     ) -> Result<Self> {
+        let echo = echo_reference::enabled() && echo_reference::available();
+        if !echo {
+            return Self::open_playback(plan, alsa_device, equalizer_control, false);
+        }
+        match Self::open_playback(plan.clone(), alsa_device, equalizer_control.clone(), true) {
+            Ok(pipeline) => Ok(pipeline),
+            Err(_) => Self::open_playback(plan, alsa_device, equalizer_control, false),
+        }
+    }
+
+    fn open_playback(
+        plan: AudioMixerPlan,
+        alsa_device: &str,
+        equalizer_control: crate::EqualizerControl,
+        use_echo: bool,
+    ) -> Result<Self> {
         let pipeline = gst::Pipeline::new();
         let clock = gst::SystemClock::obtain();
         pipeline.use_clock(Some(&clock));
@@ -2146,9 +2162,13 @@ impl AudioGstPipeline {
         let mix_caps = make("capsfilter", "float-mixer-output")?;
         set_checked(&mix_caps, "caps", floating_mix_caps(&plan)?)?;
         let equalizer = OutputEqualizer::create(equalizer_control)?;
-        let echo_probe = if echo_reference::enabled() && echo_reference::available() {
+        let echo_probe = if use_echo && echo_reference::enabled() && echo_reference::available() {
             let name = echo_reference::next_probe_name();
-            Some((make("webrtcechoprobe", &name)?, name))
+            Some((
+                make("audioconvert", "echo-probe-converter")?,
+                make("webrtcechoprobe", &name)?,
+                name,
+            ))
         } else {
             None
         };
@@ -2156,14 +2176,20 @@ impl AudioGstPipeline {
         if let Some(dsp) = equalizer.as_ref() {
             output_elements.extend(dsp.elements());
         }
-        if let Some((probe, _)) = echo_probe.as_ref() {
+        if let Some((converter, probe, _)) = echo_probe.as_ref() {
+            output_elements.push(converter);
             output_elements.push(probe);
         }
         output_elements.extend([&output_convert, &output_caps, &sink]);
         pipeline
             .add_many(&output_elements)
             .map_err(gst_error("cannot add audio output elements"))?;
-        gst::Element::link_many(&output_elements).map_err(gst_error("cannot link audio output"))?;
+        if let Err(error) =
+            gst::Element::link_many(&output_elements).map_err(gst_error("cannot link audio output"))
+        {
+            let _ = stop_pipeline(&pipeline, "audio mixer");
+            return Err(error);
+        }
         let test_tone = make("audiotestsrc", "audio-output-test-tone")?;
         set_checked(&test_tone, "is-live", true)?;
         set_checked(&test_tone, "freq", 440.0_f64)?;
@@ -2272,7 +2298,7 @@ impl AudioGstPipeline {
             let _ = stop_pipeline(&pipeline, "audio mixer");
             return Err(error);
         }
-        let echo_probe_name = if let (Some((_, name)), Some(base_time)) =
+        let echo_probe_name = if let (Some((_, _, name)), Some(base_time)) =
             (echo_probe.as_ref(), pipeline.base_time())
         {
             if let Err(error) = echo_reference::publish(EchoReference {
@@ -4266,6 +4292,58 @@ mod tests {
             assert_eq!(telemetry.last_failure, None);
             backend.shutdown().expect("shutdown");
         }
+    }
+
+    #[test]
+    fn enabled_echo_probe_links_and_publishes_on_the_null_sink() {
+        if let Err(error) = gst::init() {
+            require_host_audio_or_skip(&format!("GStreamer runtime is unavailable: {error}"));
+            return;
+        }
+        for factory in [
+            "appsrc",
+            "queue",
+            "audiomixer",
+            "audioconvert",
+            "alsasink",
+            "webrtcechoprobe",
+        ] {
+            if gst::ElementFactory::find(factory).is_none() {
+                require_host_audio_or_skip(&format!(
+                    "required GStreamer factory {factory} is unavailable"
+                ));
+                return;
+            }
+        }
+        struct DisableEcho;
+        impl Drop for DisableEcho {
+            fn drop(&mut self) {
+                echo_reference::set_enabled(false);
+            }
+        }
+        let _disable_echo = DisableEcho;
+        echo_reference::set_enabled(true);
+        let format = AudioFormatId::new(0x8000);
+        let plan = AudioMixerPlan::new(&[(AudioStreamId::Main, format)]).expect("mixer plan");
+        let pipeline = AudioGstPipeline::start(plan, "null").expect("echo playback");
+        let name = pipeline
+            .echo_probe_name
+            .clone()
+            .expect("echo probe published");
+        assert!(pipeline.pipeline.by_name("echo-probe-converter").is_some());
+        assert!(pipeline.pipeline.by_name(&name).is_some());
+        assert_eq!(
+            echo_reference::current()
+                .expect("echo reference")
+                .expect("published reference")
+                .probe_name,
+            name
+        );
+        drop(pipeline);
+        echo_reference::set_enabled(false);
+        let plan = AudioMixerPlan::new(&[(AudioStreamId::Main, format)]).expect("mixer plan");
+        let pipeline = AudioGstPipeline::start(plan, "null").expect("playback without echo");
+        assert!(pipeline.echo_probe_name.is_none());
     }
 
     #[test]
