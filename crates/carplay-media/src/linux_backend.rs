@@ -2853,8 +2853,8 @@ impl MicrophoneGstPipeline {
         let codec = packetizer.config().codec;
         let pipeline = gst::Pipeline::new();
         if let Some(reference) = reference {
-            // ponytail: one clock and base time across two pipelines. If Cayman logs
-            // continuous webrtcdsp skip/silence, switch to the Rust AEC crate.
+            // Share one SystemClock and base_time across the two pipelines. If GST_DEBUG
+            // shows continuous webrtcdsp skip/silence, that alignment failed.
             pipeline.use_clock(Some(&gst::SystemClock::obtain()));
             pipeline.set_start_time(gst::ClockTime::NONE);
             pipeline.set_base_time(reference.base_time);
