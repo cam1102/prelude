@@ -9,6 +9,7 @@ mod device_discovery;
 mod display_runtime;
 #[cfg(all(target_os = "linux", feature = "linux-backend"))]
 mod echo_reference;
+mod echo_tuning;
 mod equalizer;
 mod error;
 #[cfg(all(target_os = "linux", feature = "linux-backend"))]
@@ -52,6 +53,7 @@ pub use device_discovery::{
 };
 #[cfg(all(target_os = "linux", feature = "linux-backend"))]
 pub use display_runtime::{LinuxDisplayHandle, LinuxDisplayRuntime};
+pub use echo_tuning::{EchoTuning, NoiseSuppressionLevel};
 pub use equalizer::{
     EQUALIZER_BANDS, EQUALIZER_FREQUENCIES_HZ, EqualizerAvailability, EqualizerControl,
     EqualizerSettings, MAX_BAND_HALF_DB, MAX_PREAMP_HALF_DB, MIN_BAND_HALF_DB, MIN_PREAMP_HALF_DB,
@@ -59,8 +61,8 @@ pub use equalizer::{
 };
 pub use error::{Error, Result};
 #[cfg(all(target_os = "linux", feature = "linux-backend"))]
-pub fn set_echo_cancellation(enabled: bool) {
-    echo_reference::set_enabled(enabled);
+pub fn set_echo_cancellation(tuning: EchoTuning) {
+    echo_reference::set_tuning(tuning);
 }
 
 #[cfg(all(target_os = "linux", feature = "linux-backend"))]
