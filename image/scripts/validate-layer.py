@@ -565,6 +565,8 @@ if 'PACKAGECONFIG:append = " opus"' not in gst_base_policy:
     fail("GStreamer base plugins are missing the Opus decoder")
 if 'PACKAGECONFIG:append = " faad"' not in gst_bad_policy:
     fail("GStreamer bad plugins are missing the FAAD AAC decoder")
+if 'PACKAGECONFIG:append = " webrtcdsp"' not in gst_bad_policy:
+    fail("GStreamer bad plugins are missing the WebRTC DSP echo canceller")
 if "MACHINE_FEATURES:remove" in distro:
     fail("distro removes BSP machine features that wireless projection needs")
 distro_removals = re.search(
@@ -661,6 +663,7 @@ for media_package in (
     "gstreamer1.0-plugins-good-rtpmanager",
     "gstreamer1.0-plugins-good-video4linux2",
     "gstreamer1.0-plugins-bad-faad",
+    "gstreamer1.0-plugins-bad-webrtcdsp",
     "gstreamer1.0-plugins-bad-videoparsersbad",
 ):
     if media_package not in packagegroup:

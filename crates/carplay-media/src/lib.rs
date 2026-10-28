@@ -7,6 +7,8 @@ mod backpressure;
 mod device_discovery;
 #[cfg(all(target_os = "linux", feature = "linux-backend"))]
 mod display_runtime;
+#[cfg(all(target_os = "linux", feature = "linux-backend"))]
+mod echo_reference;
 mod equalizer;
 mod error;
 #[cfg(all(target_os = "linux", feature = "linux-backend"))]
@@ -56,6 +58,11 @@ pub use equalizer::{
     db_to_linear, half_db_to_db,
 };
 pub use error::{Error, Result};
+#[cfg(all(target_os = "linux", feature = "linux-backend"))]
+pub fn set_echo_cancellation(enabled: bool) {
+    echo_reference::set_enabled(enabled);
+}
+
 #[cfg(all(target_os = "linux", feature = "linux-backend"))]
 pub use linux_backend::{
     AudioBackendFailureKind, AudioBackendTelemetrySnapshot, AudioFrameSender, AudioOutputRoute,
